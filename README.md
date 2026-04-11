@@ -1,0 +1,216 @@
+# SimRailConnect: High-Fidelity Telemetry Bridge
+
+SimRailConnect is a MelonLoader mod that exposes SimRail's internal telemetry via a local HTTP REST API. This project provides a bridge for developers to build external safety systems, custom displays, or hardware interfaces by accessing deep-level data (such as brake pressures and traction force) not available through the official public API.
+
+---
+
+## Legal Disclosure & Compliance
+
+### 1. Purpose of Interoperability
+Under Article 80-2, Paragraph 3, Item 8 of the Taiwan Copyright Act, reverse engineering is permitted for achieving Interoperability between independently created software. This project acts as a bridge for external safety logic and monitoring tools to communicate with the game engine.
+
+### 2. EULA Compliance & Necessity
+This work falls under the "except as expressly permitted by applicable law" clause of the SimRail EULA. Reverse engineering (via MelonLoader injection) is a technical necessity to identify undocumented telemetry data structures within the IL2CPP environment (specifically `VehiclePyscreenDataSource`) required for high-fidelity safety system simulation.
+
+### 3. Non-Destructive Implementation
+This mod utilises Memory Injection (Hooking) via HarmonyX and does not modify original game binaries on disk. It complies with Art. 80-1 regarding Copyright Management Information.
+
+### ⚠️ IMPORTANT: PROHIBITED USES
+- **No Cheating**: Strictly for simulation and research purposes. Using this tool to gain unfair advantages or interfere with other players in multiplayer mode is prohibited.
+- **No Illegal Activity**: Do not use this tool to bypass DRM or distribute unauthorized game content.
+- **User Responsibility**: Any misuse in multiplayer sessions may result in account bans. The maintainer accepts no liability for third-party claims or damages arising from the use of this repository.
+
+---
+
+## For Developers
+
+### Architecture Overview
+| Component | Role |
+| :--- | :--- |
+| **Plugin** (`Plugin.cs`) | MelonLoader mod entry-point; manages lifecycle, preferences, scene events, and Harmony patching |
+| **TelemetryMonitor** (`TelemetryMonitor.cs`) | HarmonyX postfix on `Pyscreen.Update()` — drives the telemetry collection loop on the Unity main thread |
+| **GameBridge** (`GameBridge.cs`) | IL2CPP interop layer; reads `Pyscreen`/`Vehicle` native arrays (`float`/`int`/`bool`) via direct memory access |
+| **HttpApiServer** (`HttpApiServer.cs`) | Background HTTP listener serving JSON telemetry endpoints |
+| **Models** (`Models.cs`) | Structured data model: `TelemetrySnapshot` and all sub-types |
+| **TelemetryState** (`TelemetryState.cs`) | Shared volatile state between the Unity main thread and the HTTP background thread |
+
+### Why HarmonyX instead of ClassInjector?
+`ClassInjector.RegisterTypeInIl2Cpp<T>()` installs a global `Class_GetFieldDefaultValue_Hook` that intercepts field-metadata queries for every class during every scene load. On specific SimRail scene transitions (train approaching the player, spawn-outside-cab missions) the `Il2CppFieldInfo*` stored by that hook becomes a dangling pointer, causing an `AccessViolationException`. Removing `ClassInjector` entirely eliminates the hook and the crash.
+
+Patching `Pyscreen.Update()` with HarmonyX gives a guaranteed main-thread callback every frame while the player is seated in the cab, with a direct reference to the live `VehiclePyscreenDataSource`, and zero IL2CPP class injection.
+
+### Crash Prevention: Scene Lifecycle
+
+`Plugin` overrides MelonLoader's `OnSceneWasUnloaded()` to call `GameBridge.InvalidateCache()` when a major scene is torn down. This clears all cached native-object pointers before any new `Pyscreen.Update()` tick can dereference stale memory.
+
+**Important:** SimRail's world streamer loads and unloads terrain-chunk scenes constantly while driving (named `*_terrain_x*_z*`). These tiles never own train objects, so `InvalidateCache()` is deliberately **skipped** for terrain unloads. Calling it on terrain unloads would reset `_dataFieldOffset` every ~1 second, forcing a `Marshal.ReadIntPtr` probe loop on every telemetry tick and eventually triggering an `AccessViolationException` on a garbage pointer.
+
+### IL2CPP Wrapper Identity vs. Native Pointer Equality
+
+In Il2CppInterop, `TryCast<T>()` allocates a **new managed wrapper object** on every call, even when wrapping the same underlying native IL2CPP instance. This means the C# `==` operator on two wrappers for the same native object returns `false`.
+
+`SetDataSource` therefore compares native pointers via `IL2CPP.Il2CppObjectBaseToPtr()` instead of managed reference identity. Without this fix, `PopulateSubCache` (including an expensive `FindObjectOfType<NextStationPanel>()` call) would run on every telemetry tick.
+
+### Native Memory Safety
+
+`GameBridge` reads IL2CPP array data directly via `Marshal.ReadIntPtr` / `Marshal.ReadInt64`. `AccessViolationException` thrown from native memory reads is **not catchable** via `catch (Exception)` in .NET 6. The mitigations in place:
+
+1. `_dataFieldOffset` is reset to `-1` on `InvalidateCache()` — `GetDataArrayPtr` short-circuits to `IntPtr.Zero` before any `Marshal` call.
+2. `IsPlausibleArrayPointer()` validates every pointer before dereference: non-zero, 8-byte aligned, within user-space range (`> 0x10000` and `< 0x8000_0000_0000_0000`).
+3. `InvalidateCache()` is only triggered by major scene transitions, not per-tile world-streamer events.
+
+### Thread-Safety Model
+
+SimRailConnect uses a strict **one writer / one reader** model:
+
+| Context | Allowed operations |
+| :--- | :--- |
+| Unity main thread (`TelemetryMonitor.Postfix`) | All `Marshal.Read*`, `Marshal.Write*`, `SetDataSource`, `InvalidateCache` |
+| HTTP background thread | Read `TelemetryState.CurrentSnapshot` (volatile reference — atomic on 64-bit .NET 6) only |
+
+**HTTP → main-thread handoff** is handled by `GameBridge.DrainPendingMainThreadOps()`, which is called at the end of each telemetry tick:
+
+- `POST /api/write` — enqueues a closure in a `ConcurrentQueue<Action>`; the closure executes on the main thread in the next tick.
+- `GET /api/invalidate` — sets a `volatile bool` flag; the main thread drains it in the next tick.
+- `GET /api/debug` — sets a request flag; the main thread collects the snapshot and stores it as `volatile object?`; the HTTP thread polls (≤ 600 ms) for the result.
+
+This guarantees that no `Marshal.*` call ever executes on the HTTP thread and eliminates all cross-thread native-memory races.
+
+### IL2CPP Interop Namespace Prefixes
+
+When building against MelonLoader's Il2CppInterop-generated assemblies, game types are placed in a **prefixed namespace** rather than the global namespace:
+
+| Original (game) | Interop assembly | Example |
+| :--- | :--- | :--- |
+| `Pyscreen` | `Il2Cpp.Pyscreen` | `using Il2Cpp;` |
+| `VehiclePyscreenDataSource` | `Il2Cpp.VehiclePyscreenDataSource` | `using Il2Cpp;` |
+| `TMPro.TMP_Text` | `Il2CppTMPro.TMP_Text` | `using Il2CppTMPro;` |
+| `UnityEngine.Time` | `UnityEngine.Time` | `using UnityEngine;` (unchanged) |
+
+All source files that reference IL2CPP game types must include `using Il2Cpp;`. TMPro types require `using Il2CppTMPro;`. Standard UnityEngine types retain the `UnityEngine` namespace unchanged.
+
+### The Write API Strategy
+The `POST /api/write` endpoint is designed specifically for Safety System implementation.
+- **Intent**: To allow external logic to interact with dashboard indicators, reset safety timers, or trigger emergency braking sequences.
+- **Technical Note**: Writing to Pyscreen arrays typically modifies **display/dashboard values** and may **not** modify the actual physical simulation state.
+- **Execution Model**: Writes are fire-and-forget. The HTTP response is returned immediately with "Write queued"; the write itself executes on the Unity main thread at the next telemetry tick (~100 ms). Writes are silently dropped if no active data source exists at that point.
+
+---
+
+## API Documentation
+
+Base URL: `http://localhost:5555` | Format: `JSON` (Use `?pretty=true` for formatted output)
+
+### Read Endpoints (GET)
+
+| Endpoint | Description | Key Data Points |
+| :--- | :--- | :--- |
+| `/api/telemetry` | Full snapshot | All subsystems (Train, Brakes, Safety, etc.) |
+| `/api/train` | Movement data | `velocity`, `distance`, `direction` |
+| `/api/brakes` | Brake pressures | `bc`, `bp`, `sp`, `cp` (in bar) |
+| `/api/electrical` | Traction data | `voltage`, `tractionforce`, `power`, `rpm` |
+| `/api/safety` | Safety Systems | `shp`, `ca`, `alarm_active` |
+| `/api/doors` | Door states | Door/doorstep states, slip detection |
+| `/api/controls` | Driver inputs | `throttle` (mainctrl_pos), `speed_control`, `lights` |
+| `/api/station` | Timetable info | Next station and schedule fields |
+| `/api/environment`| World data | Game time, radio channel, brightness |
+| `/api/invalidate` | System Reset | Force rescan of game object references |
+
+### Write Endpoint (POST)
+
+| Endpoint | Requirement | Intended Use |
+| :--- | :--- | :--- |
+| `/api/write` | `EnableWriteApi=true` | **Safety System Intervention only**: Triggering brakes, resetting safety timers, or dashboard alerts. |
+
+**Example Payload**:
+```json
+{
+  "target": "generalBool",
+  "field": "shp",
+  "value": true
+}
+```
+
+Check [API_DOCUMENTATION.md](API_DOCUMENTATION.md) for more details.
+
+---
+
+## Build & Install
+
+### Prerequisites
+- **.NET 6.0 SDK**
+- **MelonLoader v0.6.x or later** (IL2CPP build) installed into SimRail
+- **Cpp2IL ≥ 2022.1.0-pre-release.21** (see note below)
+
+### ⚠️ Cpp2IL Compatibility Issue
+
+MelonLoader bundles Cpp2IL `2022.1.0-pre-release.12`, which **fails to parse SimRail's GameAssembly.dll** (IL2CPP metadata version 29.1) with:
+
+```
+OverflowException: Provided address, 0x8D8A, was less than image base, 0x180000000
+```
+
+This prevents MelonLoader from generating the `Il2CppAssemblies\` folder on first run, causing all game types to be unresolvable. **You must manually replace the bundled Cpp2IL with `pre-release.21`** before the first launch:
+
+1. Download `Cpp2IL-2022.1.0-pre-release.21-Windows.exe` from the [Cpp2IL releases page](https://github.com/SamboyCoding/Cpp2IL/releases/tag/2022.1.0-pre-release.21)
+2. Rename it to `Cpp2IL.exe` and copy it to:
+   ```
+   <SimRail>\MelonLoader\Dependencies\Il2CppAssemblyGenerator\Cpp2IL\
+   ```
+   (overwrite the existing `Cpp2IL.exe`)
+3. Launch SimRail once — MelonLoader will regenerate all interop assemblies under `<SimRail>\MelonLoader\Il2CppAssemblies\` using the fixed binary (~10 seconds)
+4. Exit and proceed to build
+
+This is a one-time setup. Once `Il2CppAssemblies\` exists, subsequent builds and launches work normally.
+
+### Build
+```bash
+dotnet build -c Release
+```
+The build output is written to `src/SimRailConnect/bin/Release/net6.0/SimRailConnect.dll`.  
+If a `Mods/` folder already exists in your SimRail directory the post-build target copies the DLL there automatically.
+
+### Deploy (manual)
+1. Copy `SimRailConnect.dll` to `<SimRail>\Mods\`.
+2. Launch SimRail — MelonLoader will load the mod automatically.
+
+### Configure
+Edit `<SimRail>\UserData\MelonPreferences.cfg` under the `[SimRailConnect]` section:
+
+| Key | Default | Description |
+| :--- | :--- | :--- |
+| `Port` | `5555` | HTTP API server port |
+| `UpdateIntervalMs` | `100` | Telemetry poll interval in milliseconds |
+| `EnableWriteApi` | `true` | Enable `POST /api/write` |
+
+### Logs
+MelonLoader writes all mod output (including SimRailConnect messages) to:
+```
+<SimRail>\MelonLoader\Latest.log
+```
+
+---
+
+## License & Support
+
+### 1. License
+This project is released under the GNU General Public License v3 (GPLv3). Any derivative works or modifications must remain open-source under the same license.
+
+### 2. AI Disclosure & Bug Warning
+Parts of this project (including documentation and code structures) were authored or optimized with the assistance of AI tools. While tested, there remains a possibility of unexpected bugs or behavior. Users should review the code before deployment in critical environments.
+
+### 3. Legal Jurisdiction
+Any disputes arising from this project shall be governed by the laws of Taiwan (R.O.C.), with the Taiwan Taichung District Court as the court of first instance.
+
+### 4. Contact & Rights Inquiries
+If you believe this project infringes upon your rights or requires explicit authorization evidence, please contact:
+- **Email**: **support@mirukuneko.cc**
+- **Issues**: Open an Issue on this repository.
+
+### 5. Support
+If you find this tool useful and wish to support further development, please visit:
+- **Donate**: [https://mirukuneko.cc/donate](https://mirukuneko.cc/donate)
+
+---
+*Disclaimer: Not an official SimRail product. Developed for simulation research and safety system fidelity.*
+
