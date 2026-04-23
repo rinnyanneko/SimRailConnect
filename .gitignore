@@ -27,6 +27,6 @@ desktop.ini
 .DS_Store
 
 # ============================================
-# BepInEx runtime (not part of source)
+# AI Agent files
 # ============================================
-/BepInEx/
+.claude/

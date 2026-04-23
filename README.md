@@ -37,58 +37,6 @@ This mod utilises Memory Injection (Hooking) via HarmonyX and does not modify or
 ### Why HarmonyX instead of ClassInjector?
 `ClassInjector.RegisterTypeInIl2Cpp<T>()` installs a global `Class_GetFieldDefaultValue_Hook` that intercepts field-metadata queries for every class during every scene load. On specific SimRail scene transitions (train approaching the player, spawn-outside-cab missions) the `Il2CppFieldInfo*` stored by that hook becomes a dangling pointer, causing an `AccessViolationException`. Removing `ClassInjector` entirely eliminates the hook and the crash.
 
-Patching `Pyscreen.Update()` with HarmonyX gives a guaranteed main-thread callback every frame while the player is seated in the cab, with a direct reference to the live `VehiclePyscreenDataSource`, and zero IL2CPP class injection.
-
-### Crash Prevention: Scene Lifecycle
-
-`Plugin` overrides MelonLoader's `OnSceneWasUnloaded()` to call `GameBridge.InvalidateCache()` when a major scene is torn down. This clears all cached native-object pointers before any new `Pyscreen.Update()` tick can dereference stale memory.
-
-**Important:** SimRail's world streamer loads and unloads terrain-chunk scenes constantly while driving (named `*_terrain_x*_z*`). These tiles never own train objects, so `InvalidateCache()` is deliberately **skipped** for terrain unloads. Calling it on terrain unloads would reset `_dataFieldOffset` every ~1 second, forcing a `Marshal.ReadIntPtr` probe loop on every telemetry tick and eventually triggering an `AccessViolationException` on a garbage pointer.
-
-### IL2CPP Wrapper Identity vs. Native Pointer Equality
-
-In Il2CppInterop, `TryCast<T>()` allocates a **new managed wrapper object** on every call, even when wrapping the same underlying native IL2CPP instance. This means the C# `==` operator on two wrappers for the same native object returns `false`.
-
-`SetDataSource` therefore compares native pointers via `IL2CPP.Il2CppObjectBaseToPtr()` instead of managed reference identity. Without this fix, `PopulateSubCache` (including an expensive `FindObjectOfType<NextStationPanel>()` call) would run on every telemetry tick.
-
-### Native Memory Safety
-
-`GameBridge` reads IL2CPP array data directly via `Marshal.ReadIntPtr` / `Marshal.ReadInt64`. `AccessViolationException` thrown from native memory reads is **not catchable** via `catch (Exception)` in .NET 6. The mitigations in place:
-
-1. `_dataFieldOffset` is reset to `-1` on `InvalidateCache()` — `GetDataArrayPtr` short-circuits to `IntPtr.Zero` before any `Marshal` call.
-2. `IsPlausibleArrayPointer()` validates every pointer before dereference: non-zero, 8-byte aligned, within user-space range (`> 0x10000` and `< 0x8000_0000_0000_0000`).
-3. `InvalidateCache()` is only triggered by major scene transitions, not per-tile world-streamer events.
-
-### Thread-Safety Model
-
-SimRailConnect uses a strict **one writer / one reader** model:
-
-| Context | Allowed operations |
-| :--- | :--- |
-| Unity main thread (`TelemetryMonitor.Postfix`) | All `Marshal.Read*`, `Marshal.Write*`, `SetDataSource`, `InvalidateCache` |
-| HTTP background thread | Read `TelemetryState.CurrentSnapshot` (volatile reference — atomic on 64-bit .NET 6) only |
-
-**HTTP → main-thread handoff** is handled by `GameBridge.DrainPendingMainThreadOps()`, which is called at the end of each telemetry tick:
-
-- `POST /api/write` — enqueues a closure in a `ConcurrentQueue<Action>`; the closure executes on the main thread in the next tick.
-- `GET /api/invalidate` — sets a `volatile bool` flag; the main thread drains it in the next tick.
-- `GET /api/debug` — sets a request flag; the main thread collects the snapshot and stores it as `volatile object?`; the HTTP thread polls (≤ 600 ms) for the result.
-
-This guarantees that no `Marshal.*` call ever executes on the HTTP thread and eliminates all cross-thread native-memory races.
-
-### IL2CPP Interop Namespace Prefixes
-
-When building against MelonLoader's Il2CppInterop-generated assemblies, game types are placed in a **prefixed namespace** rather than the global namespace:
-
-| Original (game) | Interop assembly | Example |
-| :--- | :--- | :--- |
-| `Pyscreen` | `Il2Cpp.Pyscreen` | `using Il2Cpp;` |
-| `VehiclePyscreenDataSource` | `Il2Cpp.VehiclePyscreenDataSource` | `using Il2Cpp;` |
-| `TMPro.TMP_Text` | `Il2CppTMPro.TMP_Text` | `using Il2CppTMPro;` |
-| `UnityEngine.Time` | `UnityEngine.Time` | `using UnityEngine;` (unchanged) |
-
-All source files that reference IL2CPP game types must include `using Il2Cpp;`. TMPro types require `using Il2CppTMPro;`. Standard UnityEngine types retain the `UnityEngine` namespace unchanged.
-
 ### The Write API Strategy
 The `POST /api/write` endpoint is designed specifically for Safety System implementation.
 - **Intent**: To allow external logic to interact with dashboard indicators, reset safety timers, or trigger emergency braking sequences.

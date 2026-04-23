@@ -236,7 +236,10 @@ public static class GameBridge
         if (_dataFieldOffset < 0 && _cachedGf != null)
         {
             var objPtr = IL2CPP.Il2CppObjectBaseToPtr(_cachedGf);
-            if (objPtr != IntPtr.Zero)
+            // Validate the object pointer before reading from it — same reason as
+            // GetDataArrayPtr: a garbage (non-null, non-mapped) pointer would cause
+            // an AccessViolationException on Marshal.ReadIntPtr.
+            if (IsPlausibleArrayPointer(objPtr))
             {
                 foreach (var candidate in new[] { 40, 48, 32, 56 })
                 {
@@ -255,6 +258,11 @@ public static class GameBridge
                         }
                     }
                     catch { }
+                    // Note: catch{} handles only managed exceptions (e.g. IndexOutOfRange).
+                    // AccessViolationException from Marshal.ReadIntPtr is NOT catchable in
+                    // .NET 6.  Actual AVE protection comes from IsPlausibleArrayPointer(objPtr)
+                    // (outer guard, line above the loop) and IsPlausibleArrayPointer(arrPtr)
+                    // (inner guard, line 4 of the try block).
                 }
                 if (_dataFieldOffset < 0)
                 {
@@ -537,8 +545,9 @@ public static class GameBridge
     /// Returns true when <paramref name="ptr"/> looks like a plausible IL2CPP heap pointer:
     /// above the low-address guard region, 8-byte aligned, and below the kernel-space boundary.
     /// This is a fast heuristic — it does NOT guarantee the memory is accessible.
+    /// Suitable for both array pointers and IL2CPP object pointers.
     /// </summary>
-    private static bool IsPlausibleArrayPointer(IntPtr ptr)
+    internal static bool IsPlausibleArrayPointer(IntPtr ptr)
     {
         if (ptr == IntPtr.Zero) return false;
         var addr = ptr.ToInt64();
@@ -561,6 +570,11 @@ public static class GameBridge
         if (obj == null || _dataFieldOffset < 0) return IntPtr.Zero;
         var objPtr = IL2CPP.Il2CppObjectBaseToPtr(obj);
         if (objPtr == IntPtr.Zero) return IntPtr.Zero;
+        // Validate the object pointer before dereferencing it.  A garbage non-null
+        // pointer (e.g. from an uninitialized or partially freed IL2CPP object) that
+        // passes a null check but points to unmapped memory would cause an
+        // uncatchable AccessViolationException on the Marshal.ReadIntPtr below.
+        if (!IsPlausibleArrayPointer(objPtr)) return IntPtr.Zero;
         var arrPtr = Marshal.ReadIntPtr(objPtr, _dataFieldOffset);
         return IsPlausibleArrayPointer(arrPtr) ? arrPtr : IntPtr.Zero;
     }
@@ -739,9 +753,12 @@ public static class GameBridge
         if (objPtr == IntPtr.Zero)
             return new { objectFound = true, objPtrZero = true, dataFound = false };
 
-        // Snapshot the volatile-like int once to avoid a race where the Unity
-        // main thread resets it to -1 (via InvalidateCache) between the guard
-        // check and the actual Marshal.ReadIntPtr call.
+        if (!IsPlausibleArrayPointer(objPtr))
+            return new { objectFound = true, objPtrNotPlausible = true, dataFound = false };
+
+        // Local copy so the guard check and the Marshal.ReadIntPtr call use the
+        // same value (defensive against future refactors; both callers today are
+        // main-thread only, so there is no live race on _dataFieldOffset).
         var offset = _dataFieldOffset;
         var arr = offset >= 0
             ? Marshal.ReadIntPtr(objPtr, offset)
@@ -774,16 +791,17 @@ public static class GameBridge
     /// <summary>
     /// Returns a diagnostic snapshot of the sub-cache state and raw array data.
     /// Used by <c>GET /api/debug</c> to verify native field offsets and data presence.
-    /// Safe to call from the HTTP background thread (reads only cached pointers;
-    /// does not call <c>FindObjectOfType</c> or modify state).
+    /// <b>Must be called on the Unity main thread</b> — it invokes
+    /// <see cref="DescribeArrayCache"/> which calls <c>Marshal.ReadIntPtr</c>.
+    /// HTTP callers must route through <see cref="RequestDebugSnapshot"/> /
+    /// <see cref="GetDebugSnapshot"/> so the read is deferred to the main thread
+    /// via <c>DrainPendingMainThreadOps</c>.
     /// </summary>
     public static object CollectDebugInfo()
     {
-        // NOTE: do NOT call FindDataSource() here — this method is invoked from
-        // the HTTP background thread, and FindDataSource can call Unity's
-        // FindObjectOfType which is main-thread only.  The /api/debug handler
-        // in HttpApiServer guards against calling this before the cache is warm
-        // (it requires IsActive=true in the latest snapshot).
+        // NOTE: must NOT be called directly from the HTTP background thread.
+        // DescribeArrayCache calls Marshal.ReadIntPtr which is main-thread only.
+        // See DrainPendingMainThreadOps for the main-thread dispatch path.
         return new
         {
             dataSourceFound = _cachedDataSource != null,
