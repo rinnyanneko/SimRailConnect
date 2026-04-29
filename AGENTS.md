@@ -15,7 +15,7 @@ This project uses HarmonyX patches and IL2CPP interop. Treat native-object lifet
 - `src/SimRailConnect/Plugin.cs` - MelonLoader entry point, preferences, lifecycle, and Harmony patch setup.
 - `src/SimRailConnect/TelemetryMonitor.cs` - Harmony postfix around `Pyscreen.Update()` and telemetry tick coordination.
 - `src/SimRailConnect/GameBridge.cs` - IL2CPP/native interop, cached game references, snapshot construction, and queued write handling.
-- `src/SimRailConnect/HttpApiServer.cs` - local HTTP listener and JSON endpoint routing.
+- `src/SimRailConnect/HttpApiServer.cs` - local HTTP listener, JSON endpoint routing, write queue entry point, and native debug endpoint.
 - `src/SimRailConnect/TelemetryState.cs` - shared state between Unity main thread and HTTP background thread.
 - `src/SimRailConnect/Models.cs` - JSON response/request models.
 - `README.md` - user-facing overview, legal disclosure, install, configuration, and API summary.
@@ -43,6 +43,7 @@ This project uses HarmonyX patches and IL2CPP interop. Treat native-object lifet
 - Native-memory and IL2CPP object access must happen on the Unity main thread.
 - HTTP handlers run on a background thread. They must not directly read or write IL2CPP/native game objects.
 - Writes from `POST /api/write`, cache invalidations, and debug/native inspection work should be queued and drained from the telemetry tick on the Unity main thread.
+- `GET /api/debug` must remain a queued diagnostic path. Do not read native array pointers directly from the HTTP handler.
 - Keep shared HTTP/telemetry state simple, immutable where practical, and safe for cross-thread reads.
 - Be conservative with unsafe code, pointer arithmetic, `Marshal`, and direct array writes. Add comments for non-obvious native layout assumptions.
 
@@ -51,6 +52,7 @@ This project uses HarmonyX patches and IL2CPP interop. Treat native-object lifet
 - When changing endpoint behavior, update both `README.md` and `API_DOCUMENTATION.md` if user-facing contracts change.
 - Preserve JSON field names unless a breaking change is explicitly requested.
 - Keep write API behavior explicit: writes are queued, execute on the Unity main thread at the next telemetry tick, and may affect dashboard/display state rather than physical simulation state.
+- Document `/api/debug` as diagnostics only. It exposes native cache shape and raw samples for troubleshooting, not a stable integration contract.
 - The default base URL is `http://localhost:5555`; update docs if defaults change.
 
 ## Coding Style

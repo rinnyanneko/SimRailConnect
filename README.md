@@ -29,7 +29,7 @@ This mod utilises Memory Injection (Hooking) via HarmonyX and does not modify or
 | :--- | :--- |
 | **Plugin** (`Plugin.cs`) | MelonLoader mod entry-point; manages lifecycle, preferences, scene events, and Harmony patching |
 | **TelemetryMonitor** (`TelemetryMonitor.cs`) | HarmonyX postfix on `Pyscreen.Update()` — drives the telemetry collection loop on the Unity main thread |
-| **GameBridge** (`GameBridge.cs`) | IL2CPP interop layer; reads `Pyscreen`/`Vehicle` native arrays (`float`/`int`/`bool`) via direct memory access |
+| **GameBridge** (`GameBridge.cs`) | IL2CPP interop layer; reads typed `VehiclePyscreenDataSource` sub-object arrays (`generalFloat`, `generalInt`, `generalBool`, etc.) via direct memory access |
 | **HttpApiServer** (`HttpApiServer.cs`) | Background HTTP listener serving JSON telemetry endpoints |
 | **Models** (`Models.cs`) | Structured data model: `TelemetrySnapshot` and all sub-types |
 | **TelemetryState** (`TelemetryState.cs`) | Shared volatile state between the Unity main thread and the HTTP background thread |
@@ -41,7 +41,7 @@ This mod utilises Memory Injection (Hooking) via HarmonyX and does not modify or
 The `POST /api/write` endpoint is designed specifically for Safety System implementation.
 - **Intent**: To allow external logic to interact with dashboard indicators, reset safety timers, or trigger emergency braking sequences.
 - **Technical Note**: Writing to Pyscreen arrays typically modifies **display/dashboard values** and may **not** modify the actual physical simulation state.
-- **Execution Model**: Writes are fire-and-forget. The HTTP response is returned immediately with "Write queued"; the write itself executes on the Unity main thread at the next telemetry tick (~100 ms). Writes are silently dropped if no active data source exists at that point.
+- **Execution Model**: Writes are queued from the HTTP thread and executed on the Unity main thread at the next telemetry tick (~100 ms). Requests fail immediately if no active train snapshot exists; queued writes can still be skipped if the target array is unavailable by the time the main-thread tick runs.
 
 ---
 
@@ -63,12 +63,15 @@ Base URL: `http://localhost:5555` | Format: `JSON` (Use `?pretty=true` for forma
 | `/api/station` | Timetable info | Next station and schedule fields |
 | `/api/environment`| World data | Game time, radio channel, brightness |
 | `/api/invalidate` | System Reset | Force rescan of game object references |
+| `/api/debug` | Diagnostics | Native cache state, array lengths, raw samples |
 
 ### Write Endpoint (POST)
 
 | Endpoint | Requirement | Intended Use |
 | :--- | :--- | :--- |
 | `/api/write` | `EnableWriteApi=true` | **Safety System Intervention only**: Triggering brakes, resetting safety timers, or dashboard alerts. |
+
+`/api/invalidate`, `/api/debug`, and queued writes never access native IL2CPP memory directly from the HTTP background thread. They schedule work that is drained from the `Pyscreen.Update()` telemetry tick on the Unity main thread.
 
 **Example Payload**:
 ```json

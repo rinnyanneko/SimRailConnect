@@ -38,7 +38,7 @@ SimRailConnect is a **MelonLoader mod** for **SimRail — The Railway Simulator*
 - **Data-logging** and replay tools
 - **Automation** and testing scripts
 
-The mod samples internal Pyscreen (`VehiclePyscreenDataSource`) float/int/bool arrays on the Unity main thread at a configurable interval (default 100 ms) and makes them available over HTTP.
+The mod samples internal `VehiclePyscreenDataSource` typed sub-object arrays on the Unity main thread at a configurable interval (default 100 ms) and makes them available over HTTP.
 
 ### Architecture at a glance
 
@@ -46,13 +46,13 @@ The mod samples internal Pyscreen (`VehiclePyscreenDataSource`) float/int/bool a
 |---|---|
 | `Plugin` | MelonLoader mod entry-point; manages lifecycle, preferences, scene events, and Harmony patching |
 | `TelemetryMonitor` | HarmonyX postfix on `Pyscreen.Update()` — samples game state on the Unity main thread |
-| `GameBridge` | IL2CPP interop — reads and writes Pyscreen native arrays via direct memory access |
+| `GameBridge` | IL2CPP interop — reads typed `VehiclePyscreenDataSource` sub-object arrays and queues writes/debug work for the Unity main thread |
 | `HttpApiServer` | Background `HttpListener` — serves JSON endpoints |
 | `Models` | C# POCOs serialised with `System.Text.Json` (camelCase) |
 
 ### Important note on the Write API
 
-Writing via `POST /api/write` modifies **Pyscreen display/dashboard arrays**. This typically affects indicator lights and gauge readings visible on the cab screen. It may **not** alter the underlying physics simulation state. The Write API is intended for safety system research (e.g. triggering emergency-brake indicators, resetting SHP timers) — **not** for gaining unfair advantages in multiplayer.
+Writing via `POST /api/write` modifies **Pyscreen display/dashboard arrays**. This typically affects indicator lights and gauge readings visible on the cab screen. It may **not** alter the underlying physics simulation state. Write requests are accepted on the HTTP background thread, then applied on the Unity main thread at the next telemetry tick. The Write API is intended for safety system research (e.g. triggering emergency-brake indicators, resetting SHP timers) — **not** for gaining unfair advantages in multiplayer.
 
 ---
 
@@ -87,7 +87,8 @@ Expected response:
     "GET /api/station": "Next station information",
     "GET /api/environment": "Time, weather, radio",
     "POST /api/write": "Write value to telemetry (JSON body: {target, field, value})",
-    "GET /api/invalidate": "Invalidate cached game object references"
+    "GET /api/invalidate": "Invalidate cached game object references",
+    "GET /api/debug": "Native cache diagnostics (data offsets, array lengths, raw samples)"
   },
   "hint": "Add ?pretty=true to any endpoint for formatted JSON"
 }
@@ -562,9 +563,11 @@ GET http://localhost:5555/api/environment
 
 ### `POST /api/write` — Write a Value
 
-Writes a value to the Pyscreen data arrays. Requires `EnableWriteApi = true` in `UserData/MelonPreferences.cfg` (default: `true`).
+Queues a value write to the Pyscreen data arrays. Requires `EnableWriteApi = true` in `UserData/MelonPreferences.cfg` (default: `true`).
 
 > ⚠️ **Important:** This endpoint modifies **dashboard/display register values**. It is designed for safety-system simulation (triggering brake indicators, resetting vigilance timers). It does **not** necessarily alter the underlying physics engine state.
+
+The HTTP handler validates the request and enqueues the write. The native array write itself runs on the Unity main thread during the next `Pyscreen.Update()` telemetry tick.
 
 **Request**
 ```sh
@@ -587,7 +590,16 @@ See [Section 5 — Write API](#5-write-api) for the full field table.
 ```json
 {
   "success": true,
-  "data": "Written generalBool.shp = true",
+  "data": "Write queued: generalBool.shp = True (applies on next main-thread tick)",
+  "timestamp": "2026-03-15T14:22:05.131Z"
+}
+```
+
+**Response** `200 OK` — no active train snapshot
+```json
+{
+  "success": false,
+  "error": "No active data source — board a train first.",
   "timestamp": "2026-03-15T14:22:05.131Z"
 }
 ```
@@ -623,7 +635,7 @@ See [Section 5 — Write API](#5-write-api) for the full field table.
 
 ### `GET /api/invalidate` — Invalidate Cache
 
-Forces the `GameBridge` to release its cached references to game objects and re-scan on the next update cycle. Use this after switching between trains or if telemetry data appears stale.
+Schedules `GameBridge` to release its cached references to game objects on the next Unity main-thread telemetry tick and re-scan afterward. Use this after switching between trains or if telemetry data appears stale.
 
 **Request**
 ```sh
@@ -634,7 +646,89 @@ GET http://localhost:5555/api/invalidate
 ```json
 {
   "success": true,
-  "data": "Cache invalidated. Will re-scan game objects.",
+  "data": "Cache invalidation scheduled for the next main-thread tick.",
+  "timestamp": "2026-03-15T14:22:05.131Z"
+}
+```
+
+---
+
+### `GET /api/debug` — Native Cache Diagnostics
+
+Requests a diagnostic snapshot from the Unity main thread. The endpoint reports whether each cached native sub-object is present, whether its backing data array was found, detected array lengths, raw sample values, and the native array offsets currently in use.
+
+Use this endpoint when telemetry appears stale, a train-specific source array looks empty, or build/game updates may have changed native layout assumptions.
+
+**Request**
+```sh
+GET http://localhost:5555/api/debug?pretty=true
+```
+
+**Response** `200 OK` — success
+```json
+{
+  "success": true,
+  "data": {
+    "dataSourceFound": true,
+    "dataFieldOffset": 24,
+    "arrayDataOffset": 32,
+    "arrayMaxLenOfs": 24,
+    "generalFloat": {
+      "objectFound": true,
+      "dataFound": true,
+      "maxLength": 21,
+      "sample": [0.82, 0.75, 87.4, 1840.0]
+    },
+    "generalInt": {
+      "objectFound": true,
+      "dataFound": true,
+      "maxLength": 43,
+      "sample": [0, 0, 0, 3]
+    },
+    "generalBool": {
+      "objectFound": true,
+      "dataFound": true,
+      "maxLength": 14,
+      "sample": [false, false, true, true]
+    },
+    "eimppn": {
+      "objectFound": true,
+      "dataFound": true,
+      "maxLength": 4,
+      "sample": [0.0, 5.0, 8.5, 5.0]
+    },
+    "brakes": {
+      "objectFound": true,
+      "dataFound": true,
+      "maxLength": 2,
+      "sample": [false, false]
+    },
+    "emu": {
+      "objectFound": true,
+      "dataFound": true,
+      "maxLength": 8,
+      "sample": [false, false, false, false]
+    },
+    "nextStationPanel": true
+  },
+  "timestamp": "2026-03-15T14:22:05.131Z"
+}
+```
+
+**Response** `200 OK` — no active train
+```json
+{
+  "success": false,
+  "error": "No active telemetry yet (IsActive=false). Board a train, wait one tick, then try again.",
+  "timestamp": "2026-03-15T14:22:05.131Z"
+}
+```
+
+**Response** `200 OK` — timed out waiting for telemetry tick
+```json
+{
+  "success": false,
+  "error": "Debug snapshot timed out — is Pyscreen.Update() still ticking? Try boarding a train and retrying.",
   "timestamp": "2026-03-15T14:22:05.131Z"
 }
 ```
@@ -981,13 +1075,14 @@ write("bool", "sanding", True)
 | `No telemetry data available. Is a train active?` | The plugin cannot find an active train in the scene | Board a train and enter the cab |
 | `No train data available` | Sub-snapshot is null (train not active) | Same as above |
 | `Write API is disabled. Enable in config.` | `EnableWriteApi = false` in config | Set `EnableWriteApi = true` and restart |
+| `No active data source — board a train first.` | Write requested before an active telemetry snapshot exists | Board a train, wait for telemetry, and retry |
 | `Unknown field: <target>.<field>` | Invalid `target` or `field` combination | Consult the [Write API field tables](#5-write-api) |
 | `Value must be a number for float fields` | Non-numeric `value` sent for a float field | Send a JSON number, e.g. `3.14` |
 | `Value must be an integer for int fields` | Non-integer or non-numeric value | Send a JSON integer, e.g. `3` |
 | `Value must be true/false for bool fields` | Non-boolean value | Send JSON `true` or `false` |
-| `Write failed - no active data source` | GameBridge has no valid data source reference | Call `GET /api/invalidate` and retry |
 | `JSON parse error: ...` | Malformed request body | Fix the JSON syntax in the request body |
 | `Use POST method` | `GET /api/write` was requested | Use `POST` method |
+| `Debug snapshot timed out — is Pyscreen.Update() still ticking? Try boarding a train and retrying.` | `/api/debug` was requested, but the main-thread telemetry tick did not service it within 600 ms | Board a train, wait for the cab screen to update, and retry |
 | `Unknown endpoint: /api/xyz` | Path not recognised | Check [Endpoint Reference](#3-endpoint-reference) |
 
 ### Handling errors in Python
