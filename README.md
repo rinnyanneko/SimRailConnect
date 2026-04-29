@@ -1,6 +1,6 @@
 # SimRailConnect: High-Fidelity Telemetry Bridge
 
-SimRailConnect is a MelonLoader mod that exposes SimRail's internal telemetry via a local HTTP REST API. This project provides a bridge for developers to build external safety systems, custom displays, or hardware interfaces by accessing deep-level data (such as brake pressures and traction force) not available through the official public API.
+SimRailConnect is a MelonLoader plugin that exposes SimRail telemetry through a local WebSocket API. The current default is a WebSocket-only safe mode with native telemetry disabled, because some SimRail/MelonLoader IL2CPP scene transitions can crash inside Il2CppInterop's field-default hook.
 
 ---
 
@@ -13,7 +13,7 @@ Under Article 80-2, Paragraph 3, Item 8 of the Taiwan Copyright Act, reverse eng
 This work falls under the "except as expressly permitted by applicable law" clause of the SimRail EULA. Reverse engineering (via MelonLoader injection) is a technical necessity to identify undocumented telemetry data structures within the IL2CPP environment (specifically `VehiclePyscreenDataSource`) required for high-fidelity safety system simulation.
 
 ### 3. Non-Destructive Implementation
-This mod utilises Memory Injection (Hooking) via HarmonyX and does not modify original game binaries on disk. It complies with Art. 80-1 regarding Copyright Management Information.
+The current managed-only plugin does not modify original game binaries on disk and does not include Harmony, Unity, or IL2CPP references. Native telemetry work remains isolated because the current SimRail/MelonLoader IL2CPP support path crashes on some scene transitions.
 
 ### ⚠️ IMPORTANT: PROHIBITED USES
 - **No Cheating**: Strictly for simulation and research purposes. Using this tool to gain unfair advantages or interfere with other players in multiplayer mode is prohibited.
@@ -27,62 +27,69 @@ This mod utilises Memory Injection (Hooking) via HarmonyX and does not modify or
 ### Architecture Overview
 | Component | Role |
 | :--- | :--- |
-| **Plugin** (`Plugin.cs`) | MelonLoader mod entry-point; manages lifecycle, preferences, scene events, and Harmony patching |
-| **TelemetryMonitor** (`TelemetryMonitor.cs`) | HarmonyX postfix on `Pyscreen.Update()` — drives the telemetry collection loop on the Unity main thread |
-| **GameBridge** (`GameBridge.cs`) | IL2CPP interop layer; reads typed `VehiclePyscreenDataSource` sub-object arrays (`generalFloat`, `generalInt`, `generalBool`, etc.) via direct memory access |
-| **HttpApiServer** (`HttpApiServer.cs`) | Background HTTP listener serving JSON telemetry endpoints |
+| **Plugin** (`Plugin.cs`) | MelonLoader plugin entry-point; manages preferences and WebSocket startup |
+| **TelemetryMonitor** (`TelemetryMonitor.cs`) | Native telemetry prototype; excluded from the managed-only plugin build |
+| **GameBridge** (`GameBridge.cs`) | Native telemetry prototype; excluded from the managed-only plugin build |
+| **WebSocketApiServer** (`WebSocketApiServer.cs`) | Localhost WebSocket server for telemetry push, snapshot request/response, ping/pong, and queued commands |
+| **ApiCommandRegistry** (`ApiCommandRegistry.cs`) | Network-thread-safe command whitelist, type validation, and range validation |
 | **Models** (`Models.cs`) | Structured data model: `TelemetrySnapshot` and all sub-types |
-| **TelemetryState** (`TelemetryState.cs`) | Shared volatile state between the Unity main thread and the HTTP background thread |
+| **TelemetryState** (`TelemetryState.cs`) | Shared volatile state between the Unity main thread and WebSocket background threads |
 
-### Why HarmonyX instead of ClassInjector?
-`ClassInjector.RegisterTypeInIl2Cpp<T>()` installs a global `Class_GetFieldDefaultValue_Hook` that intercepts field-metadata queries for every class during every scene load. On specific SimRail scene transitions (train approaching the player, spawn-outside-cab missions) the `Il2CppFieldInfo*` stored by that hook becomes a dangling pointer, causing an `AccessViolationException`. Removing `ClassInjector` entirely eliminates the hook and the crash.
+### Why Native Telemetry Is Disabled
+`ClassInjector.RegisterTypeInIl2Cpp<T>()` and MelonLoader's IL2CPP support-module injection use `Class_GetFieldDefaultValue_Hook`, which can crash during specific SimRail scene transitions. The current plugin build therefore excludes Harmony, Unity, IL2CPP, `Assembly-CSharp`, `GameBridge`, `TelemetryMonitor`, and `ApiCommandRegistry` entirely.
+
+### Current Safe Mode
+`EnableTelemetryPatch` defaults to `false` and is currently ignored by the managed-only plugin build. The WebSocket server starts, but native telemetry, debug, invalidation, and write commands return `NATIVE_TELEMETRY_DISABLED`.
 
 ### The Write API Strategy
-The `POST /api/write` endpoint is designed specifically for Safety System implementation.
+WebSocket `command` messages are designed specifically for Safety System implementation.
 - **Intent**: To allow external logic to interact with dashboard indicators, reset safety timers, or trigger emergency braking sequences.
 - **Technical Note**: Writing to Pyscreen arrays typically modifies **display/dashboard values** and may **not** modify the actual physical simulation state.
-- **Execution Model**: Writes are queued from the HTTP thread and executed on the Unity main thread at the next telemetry tick (~100 ms). Requests fail immediately if no active train snapshot exists; queued writes can still be skipped if the target array is unavailable by the time the main-thread tick runs.
+- **Execution Model**: Writes are queued from WebSocket background threads and executed on the Unity main thread at the next telemetry tick (~100 ms). Requests fail immediately if no active train snapshot exists; queued writes can still be skipped if the target array is unavailable by the time the main-thread tick runs.
 
 ---
 
 ## API Documentation
 
-Base URL: `http://localhost:5555` | Format: `JSON` (Use `?pretty=true` for formatted output)
+WebSocket URL: `ws://localhost:5556/ws` | Default push rate: `10Hz`
 
-### Read Endpoints (GET)
+### WebSocket Quick Example
 
-| Endpoint | Description | Key Data Points |
-| :--- | :--- | :--- |
-| `/api/telemetry` | Full snapshot | All subsystems (Train, Brakes, Safety, etc.) |
-| `/api/train` | Movement data | `velocity`, `distance`, `direction` |
-| `/api/brakes` | Brake pressures | `bc`, `bp`, `sp`, `cp` (in bar) |
-| `/api/electrical` | Traction data | `voltage`, `tractionforce`, `power`, `rpm` |
-| `/api/safety` | Safety Systems | `shp`, `ca`, `alarm_active` |
-| `/api/doors` | Door states | Door/doorstep states, slip detection |
-| `/api/controls` | Driver inputs | `throttle` (mainctrl_pos), `speed_control`, `lights` |
-| `/api/station` | Timetable info | Next station and schedule fields |
-| `/api/environment`| World data | Game time, radio channel, brightness |
-| `/api/invalidate` | System Reset | Force rescan of game object references |
-| `/api/debug` | Diagnostics | Native cache state, array lengths, raw samples |
-
-### Write Endpoint (POST)
-
-| Endpoint | Requirement | Intended Use |
-| :--- | :--- | :--- |
-| `/api/write` | `EnableWriteApi=true` | **Safety System Intervention only**: Triggering brakes, resetting safety timers, or dashboard alerts. |
-
-`/api/invalidate`, `/api/debug`, and queued writes never access native IL2CPP memory directly from the HTTP background thread. They schedule work that is drained from the `Pyscreen.Update()` telemetry tick on the Unity main thread.
-
-**Example Payload**:
+Subscribe:
 ```json
 {
+  "type": "subscribe",
+  "id": "sub-001",
+  "channels": ["train", "brakes", "doors", "safety"],
+  "rateHz": 10
+}
+```
+
+Command:
+```json
+{
+  "type": "command",
+  "id": "cmd-001",
+  "target": "brakes",
+  "action": "set_brake",
+  "value": 4
+}
+```
+
+Commands receive an immediate queued `ack`, then a later `commandResult` after the Unity main-thread telemetry tick applies or rejects the write.
+
+Field-style command payload:
+```json
+{
+  "type": "command",
+  "id": "cmd-002",
   "target": "generalBool",
   "field": "shp",
   "value": true
 }
 ```
 
-Check [API_DOCUMENTATION.md](API_DOCUMENTATION.md) for more details.
+Check [WEBSOCKET_API.md](WEBSOCKET_API.md) for more detail.
 
 ---
 
@@ -119,20 +126,28 @@ This is a one-time setup. Once `Il2CppAssemblies\` exists, subsequent builds and
 dotnet build -c Release
 ```
 The build output is written to `src/SimRailConnect/bin/Release/net6.0/SimRailConnect.dll`.  
-If a `Mods/` folder already exists in your SimRail directory the post-build target copies the DLL there automatically.
+If a `Plugins/` folder already exists in your SimRail directory the post-build target copies the DLL there automatically.
 
 ### Deploy (manual)
-1. Copy `SimRailConnect.dll` to `<SimRail>\Mods\`.
-2. Launch SimRail — MelonLoader will load the mod automatically.
+1. Copy `SimRailConnect.dll` to `<SimRail>\Plugins\`.
+2. Remove any stale `SimRailConnect.dll` from `<SimRail>\Mods\`.
+3. Launch SimRail — MelonLoader will load the plugin automatically.
 
 ### Configure
 Edit `<SimRail>\UserData\MelonPreferences.cfg` under the `[SimRailConnect]` section:
 
 | Key | Default | Description |
 | :--- | :--- | :--- |
-| `Port` | `5555` | HTTP API server port |
 | `UpdateIntervalMs` | `100` | Telemetry poll interval in milliseconds |
-| `EnableWriteApi` | `true` | Enable `POST /api/write` |
+| `WebSocketPort` | `5556` | WebSocket API server port |
+| `WebSocketMaxClients` | `3` | Maximum concurrent WebSocket clients |
+| `WebSocketDefaultRateHz` | `10` | Default telemetry push rate |
+| `WebSocketMaxRateHz` | `20` | Maximum per-client push rate |
+| `WebSocketPayloadLimitBytes` | `16384` | Maximum inbound WebSocket JSON size |
+| `WebSocketCommandRateLimitPerSecond` | `5` | Per-client command rate limit |
+| `WebSocketReadOnly` | `false` | Disable WebSocket commands while keeping telemetry push |
+| `EnableTelemetryPatch` | `false` | Reserved for a future separate native telemetry assembly; ignored by this managed-only plugin |
+| `ApiToken` | empty | Optional WebSocket token; pass as `?token=...` or `Authorization: Bearer ...` |
 
 ### Logs
 MelonLoader writes all mod output (including SimRailConnect messages) to:

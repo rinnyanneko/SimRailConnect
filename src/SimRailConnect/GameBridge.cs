@@ -21,7 +21,6 @@ using System.Runtime.InteropServices;
 using Il2Cpp;
 using Il2CppInterop.Runtime;
 using Il2CppTMPro;
-using UnityEngine;
 
 namespace SimRailConnect;
 
@@ -69,6 +68,9 @@ public static class GameBridge
     private const int B_ALARM_ACTIVE = 11;
     private const int B_AC_STATUS = 12;
     private const int B_DIESEL_MODE = 13;
+    private const int B_RADIO_NOISE = 14;
+    private const int B_RADIO_NIGHTMODE = 15;
+    private const int B_RADIO_VOLUMEMODE = 16;
 
     // ─── Int indices (PyscreenGeneralInt) ────────────────────────────────────
     private const int I_SECONDS = 0;
@@ -89,6 +91,8 @@ public static class GameBridge
     private const int I_YEAR = 28;
     private const int I_ABS_STATUS = 29;
     private const int I_SOLO_DRIVE = 30;
+    private const int I_SILENT_MODE = 31;
+    private const int I_HVAC_ACTIVE = 33;
     private const int I_ED_BRAKE = 34;
     private const int I_BRAKE_DELAY = 35;
     private const int I_SPEEDCTRL_STATUS = 37;
@@ -110,6 +114,7 @@ public static class GameBridge
 
     // ─── EMU bool indices ─────────────────────────────────────────────────────
     private const int E_DOORS = 0;
+    private const int E_DOORS_NO = 1;
     private const int E_DOORS_L = 2;
     private const int E_DOORS_R = 3;
     private const int E_DOORSTEP_L = 4;
@@ -136,7 +141,8 @@ public static class GameBridge
     //
     // The live VehiclePyscreenDataSource reference is injected by the Harmony
     // patch in TelemetryMonitor (Pyscreen.Update postfix) via SetDataSource().
-    // FindObjectOfType is NEVER called on the hot telemetry path.
+    // FindObjectOfType is not used for cache acquisition; scene-wide scans during
+    // streamed scenario transitions can hand us wrappers with fragile lifetimes.
 
     private static VehiclePyscreenDataSource? _cachedDataSource;
     private static PyscreenGeneralFloat? _cachedGf;   // generalFloat  — double data
@@ -154,7 +160,7 @@ public static class GameBridge
 
     // ─── Pending main-thread operations ──────────────────────────────────────
     //
-    // All three of these are produced by the HTTP background thread and consumed
+    // All three of these are produced by WebSocket/network threads and consumed
     // by the Unity main thread inside DrainPendingMainThreadOps(), which is called
     // from TelemetryMonitor.Postfix every tick.
     //
@@ -164,26 +170,36 @@ public static class GameBridge
     // OnSceneWasUnloaded().
 
     /// <summary>
-    /// Write operations submitted via POST /api/write, to be applied on the main thread.
+    /// Write operations submitted via WebSocket command messages, to be applied on the main thread.
     /// </summary>
-    private static readonly ConcurrentQueue<Action> _pendingWrites = new();
+    private static readonly ConcurrentQueue<QueuedWriteCommand> _pendingWrites = new();
 
     /// <summary>
-    /// Set by POST /api/invalidate (HTTP thread) to request a cache wipe on the next tick.
+    /// Applied write results built on the Unity main thread and consumed by
+    /// WebSocket/network threads. Result objects contain only managed data.
+    /// </summary>
+    private static readonly ConcurrentQueue<CommandResult> _completedWrites = new();
+
+    /// <summary>
+    /// Set by WebSocket invalidate requests to request a cache wipe on the next tick.
     /// </summary>
     private static volatile bool _pendingInvalidate;
 
     /// <summary>
-    /// Set by GET /api/debug (HTTP thread) to request a debug snapshot on the next tick.
+    /// Set by WebSocket debug requests to request a debug snapshot on the next tick.
     /// Cleared and replaced by <see cref="_latestDebugSnapshot"/> by the main thread.
     /// </summary>
     private static volatile bool _debugRequested;
 
     /// <summary>
     /// Stores the last debug snapshot built on the main thread for retrieval by the
-    /// HTTP thread via <see cref="GetDebugSnapshot"/>.
+    /// WebSocket thread via <see cref="GetDebugSnapshot"/>.
     /// </summary>
     private static volatile object? _latestDebugSnapshot;
+
+    private static double _lastVelocityKmh;
+    private static DateTime _lastVelocitySampleUtc;
+    private static bool _hasLastVelocitySample;
 
     // ─── Data source acquisition ──────────────────────────────────────────────
 
@@ -219,70 +235,17 @@ public static class GameBridge
         try { _cachedPn = ds.eimppn; } catch { _cachedPn = null; }
         try { _cachedBr = ds.brakes; } catch { _cachedBr = null; }
         try { _cachedEm = ds.emu; } catch { _cachedEm = null; }
-        // NextStationPanel is separate — not on the data source.
-        try { _cachedNsp = UnityEngine.Object.FindObjectOfType<NextStationPanel>(); }
-        catch { _cachedNsp = null; }
+        // NextStationPanel is separate and has no stable owner reference here.
+        // Leave it uncached instead of scanning the scene during train streaming.
+        _cachedNsp = null;
 
-        // ── Auto-detect DataFieldOffset ───────────────────────────────────────
-        //
-        // The byte offset of T[,] data in PyscreenIOClassBase<T> depends on
-        // whether MSVC applies the Empty Base Optimisation (EBO) to the
-        // __declspec(align(8)) base PyscreenIOWrapper_Fields.  When EBO is
-        // suppressed the base adds 8 bytes, shifting data from offset 40 to 48.
-        //
-        // We probe four candidate offsets and pick the first one whose pointer
-        // dereferences to a plausible IL2CPP array (max_length in [1, 256]).
-        // This is run once per data-source acquisition and cached in _dataFieldOffset.
-        if (_dataFieldOffset < 0 && _cachedGf != null)
-        {
-            var objPtr = IL2CPP.Il2CppObjectBaseToPtr(_cachedGf);
-            // Validate the object pointer before reading from it — same reason as
-            // GetDataArrayPtr: a garbage (non-null, non-mapped) pointer would cause
-            // an AccessViolationException on Marshal.ReadIntPtr.
-            if (IsPlausibleArrayPointer(objPtr))
-            {
-                foreach (var candidate in new[] { 40, 48, 32, 56 })
-                {
-                    try
-                    {
-                        var arrPtr = Marshal.ReadIntPtr(objPtr, candidate);
-                        if (!IsPlausibleArrayPointer(arrPtr)) continue;
-                        var ml = Marshal.ReadInt64(arrPtr, ArrayMaxLenOffset);
-                        if (ml >= 1 && ml <= 256)
-                        {
-                            _dataFieldOffset = candidate;
-                            Plugin.Logger.Msg(
-                                $"[GameBridge] DataFieldOffset auto-detected: {candidate} " +
-                                $"(generalFloat maxLen={ml})");
-                            break;
-                        }
-                    }
-                    catch { }
-                    // Note: catch{} handles only managed exceptions (e.g. IndexOutOfRange).
-                    // AccessViolationException from Marshal.ReadIntPtr is NOT catchable in
-                    // .NET 6.  Actual AVE protection comes from IsPlausibleArrayPointer(objPtr)
-                    // (outer guard, line above the loop) and IsPlausibleArrayPointer(arrPtr)
-                    // (inner guard, line 4 of the try block).
-                }
-                if (_dataFieldOffset < 0)
-                {
-                    _dataFieldOffset = 40; // structural fallback
-                    Plugin.Logger.Warning(
-                        "[GameBridge] DataFieldOffset probe inconclusive — using fallback 40. " +
-                        "Call /api/debug for raw offset diagnostics.");
-                }
-            }
-        }
-
-        // Log cache status including whether the data array is reachable.
+        // Do not probe native field offsets during scene/scenario startup.
+        // The confirmed layout offset is used directly; debug requests can inspect
+        // array reachability later, after the scene is stable and only on the main thread.
         Plugin.Logger.Msg(
-            $"[GameBridge] Sub-cache (offset={_dataFieldOffset}): " +
-            $"gf={_cachedGf != null}(arr={GetDataArrayPtr(_cachedGf) != IntPtr.Zero}), " +
-            $"gi={_cachedGi != null}(arr={GetDataArrayPtr(_cachedGi) != IntPtr.Zero}), " +
-            $"gb={_cachedGb != null}(arr={GetDataArrayPtr(_cachedGb) != IntPtr.Zero}), " +
-            $"pn={_cachedPn != null}(arr={GetDataArrayPtr(_cachedPn) != IntPtr.Zero}), " +
-            $"br={_cachedBr != null}(arr={GetDataArrayPtr(_cachedBr) != IntPtr.Zero}), " +
-            $"em={_cachedEm != null}(arr={GetDataArrayPtr(_cachedEm) != IntPtr.Zero}), " +
+            $"[GameBridge] Sub-cache set (offset={_dataFieldOffset}): " +
+            $"gf={_cachedGf != null}, gi={_cachedGi != null}, gb={_cachedGb != null}, " +
+            $"pn={_cachedPn != null}, br={_cachedBr != null}, em={_cachedEm != null}, " +
             $"nsp={_cachedNsp != null}");
     }
 
@@ -341,6 +304,17 @@ public static class GameBridge
             info.UnitNo = ReadInt(I_UNIT_NO);
             info.CarNo = ReadInt(I_CAR_NO);
             info.VelocityInt = (int)Math.Round(info.Velocity);
+
+            var now = DateTime.UtcNow;
+            if (_hasLastVelocitySample)
+            {
+                var elapsed = (now - _lastVelocitySampleUtc).TotalSeconds;
+                if (elapsed > 0.001 && elapsed < 5)
+                    info.Acceleration = ((info.Velocity - _lastVelocityKmh) / 3.6) / elapsed;
+            }
+            _lastVelocityKmh = info.Velocity;
+            _lastVelocitySampleUtc = now;
+            _hasLastVelocitySample = true;
         }
         catch (Exception ex) { Plugin.Logger.Msg($"CollectTrainInfo: {ex.Message}"); }
         return info;
@@ -377,6 +351,8 @@ public static class GameBridge
             info.PowerConsumption = ReadFloat(F_EIMP_T_PD);
             info.CurrentVoltageRatio = ReadFloat(F_EIMP_T_ITOTHV);
             info.PantographPressure = ReadFloat(F_PANTPRESS);
+            info.LowVoltageStatus = ReadFloat(F_LV_STATUS);
+            info.PantographCompressorStatus = ReadFloat(F_PANTOGRAPH_COMPRESSOR);
             info.Converter = ReadBool(B_CONVERTER);
             info.AcStatus = ReadBool(B_AC_STATUS);
             info.Battery = ReadBool(B_BATTERY);
@@ -411,6 +387,7 @@ public static class GameBridge
         try
         {
             info.Doors = ReadEmu(E_DOORS);
+            info.DoorsNo = ReadEmu(E_DOORS_NO);
             info.DoorsLeft = ReadEmu(E_DOORS_L);
             info.DoorsRight = ReadEmu(E_DOORS_R);
             info.DoorstepLeft = ReadEmu(E_DOORSTEP_L);
@@ -436,6 +413,8 @@ public static class GameBridge
             info.SpeedCtrlStatus = ReadInt(I_SPEEDCTRL_STATUS);
             info.Sanding = ReadBool(B_SANDING);
             info.SoloDriveActive = ReadInt(I_SOLO_DRIVE);
+            info.SilentModeActive = ReadInt(I_SILENT_MODE);
+            info.HvacActive = ReadInt(I_HVAC_ACTIVE);
             info.LightsFront = ReadInt(I_LIGHTS_FRONT);
             info.LightsRear = ReadInt(I_LIGHTS_REAR);
             info.LightsCompartments = ReadBool(B_LIGHTS_COMPARTMENTS);
@@ -480,6 +459,9 @@ public static class GameBridge
             info.RadioActive = ReadBool(B_RADIO_ACTIVE);
             info.RadioChannel = ReadInt(I_RADIO_CHANNEL);
             info.RadioVolume = ReadFloat(F_RADIO_VOLUME);
+            info.RadioNoise = ReadBool(B_RADIO_NOISE);
+            info.RadioNightMode = ReadBool(B_RADIO_NIGHTMODE);
+            info.RadioVolumeMode = ReadBool(B_RADIO_VOLUMEMODE);
             info.ScreenBrightness = ReadInt(I_SCREEN_BRIGHTNESS);
         }
         catch (Exception ex) { Plugin.Logger.Msg($"CollectEnvironmentInfo: {ex.Message}"); }
@@ -526,15 +508,15 @@ public static class GameBridge
     // Byte offset of element = ArrayDataOffset + sizeof(T) × fieldIndex.
 
     /// <summary>
-    /// Detected byte offset of <c>T[,] data</c> within <c>PyscreenIOClassBase&lt;T&gt;</c>.
-    /// Initialised to -1 (unknown); auto-detected in <see cref="PopulateSubCache"/> by
-    /// probing candidate offsets and selecting the one that yields a valid IL2CPP array.
+    /// Confirmed byte offset of <c>T[,] data</c> within <c>PyscreenIOClassBase&lt;T&gt;</c>.
+    /// Kept fixed to avoid native pointer probing during scene/scenario startup.
     /// <para>
     /// Expected values: 40 (if MSVC applies EBO to the empty aligned base class) or
     /// 48 (if EBO is suppressed, adding 8 bytes for <c>PyscreenIOWrapper_Fields</c>).
     /// </para>
     /// </summary>
-    private static int _dataFieldOffset = -1;
+    private const int DataFieldOffset = 40;
+    private static int _dataFieldOffset = DataFieldOffset;
 
     /// <summary>Byte offset of the element data block in any IL2CPP array object (64-bit).</summary>
     private const int ArrayDataOffset = 32;
@@ -677,22 +659,36 @@ public static class GameBridge
     // This write API is provided as a framework for experimentation.
 
     /// <summary>
+    /// Enqueues a validated write command for application on the Unity main thread.
+    /// Network handlers must call this instead of touching native objects directly.
+    /// </summary>
+    public static void EnqueueWriteCommand(QueuedWriteCommand command)
+    {
+        _pendingWrites.Enqueue(command);
+        Plugin.Logger.Msg($"[GameBridge] Command queued: {command.Id} {command.Target}.{command.Field}");
+    }
+
+    /// <summary>
+    /// Returns an applied/failed command result produced by the main thread, if any.
+    /// Safe to call from network threads.
+    /// </summary>
+    public static bool TryDequeueCommandResult(out CommandResult result) =>
+        _completedWrites.TryDequeue(out result!);
+
+    /// <summary>
     /// Enqueues a float write to the telemetry data source (display only).
     /// Executes on the Unity main thread at the next telemetry tick.
     /// </summary>
     public static void WriteFloat(int index, double value)
     {
-        _pendingWrites.Enqueue(() =>
+        EnqueueWriteCommand(new QueuedWriteCommand
         {
-            try
-            {
-                var arr = GetDataArrayPtr(_cachedGf);
-                if (arr == IntPtr.Zero) return;
-                var maxLen = (long)Marshal.ReadInt64(arr, ArrayMaxLenOffset);
-                if (index >= maxLen) return;
-                Marshal.WriteInt64(arr, ArrayDataOffset + 8 * index, BitConverter.DoubleToInt64Bits(value));
-            }
-            catch (Exception ex) { Plugin.Logger.Warning($"WriteFloat failed: {ex.Message}"); }
+            Id = Guid.NewGuid().ToString("N"),
+            Target = "float",
+            Field = $"index_{index}",
+            ValueKind = "float",
+            Index = index,
+            FloatValue = value
         });
     }
 
@@ -702,17 +698,14 @@ public static class GameBridge
     /// </summary>
     public static void WriteInt(int index, int value)
     {
-        _pendingWrites.Enqueue(() =>
+        EnqueueWriteCommand(new QueuedWriteCommand
         {
-            try
-            {
-                var arr = GetDataArrayPtr(_cachedGi);
-                if (arr == IntPtr.Zero) return;
-                var maxLen = (long)Marshal.ReadInt64(arr, ArrayMaxLenOffset);
-                if (index >= maxLen) return;
-                Marshal.WriteInt32(arr, ArrayDataOffset + 4 * index, value);
-            }
-            catch (Exception ex) { Plugin.Logger.Warning($"WriteInt failed: {ex.Message}"); }
+            Id = Guid.NewGuid().ToString("N"),
+            Target = "int",
+            Field = $"index_{index}",
+            ValueKind = "int",
+            Index = index,
+            IntValue = value
         });
     }
 
@@ -722,18 +715,101 @@ public static class GameBridge
     /// </summary>
     public static void WriteBool(int index, bool value)
     {
-        _pendingWrites.Enqueue(() =>
+        EnqueueWriteCommand(new QueuedWriteCommand
         {
-            try
-            {
-                var arr = GetDataArrayPtr(_cachedGb);
-                if (arr == IntPtr.Zero) return;
-                var maxLen = (long)Marshal.ReadInt64(arr, ArrayMaxLenOffset);
-                if (index >= maxLen) return;
-                Marshal.WriteByte(arr, ArrayDataOffset + index, (byte)(value ? 1 : 0));
-            }
-            catch (Exception ex) { Plugin.Logger.Warning($"WriteBool failed: {ex.Message}"); }
+            Id = Guid.NewGuid().ToString("N"),
+            Target = "bool",
+            Field = $"index_{index}",
+            ValueKind = "bool",
+            Index = index,
+            BoolValue = value
         });
+    }
+
+    private static CommandResult ApplyWriteCommand(QueuedWriteCommand command)
+    {
+        try
+        {
+            if (_cachedDataSource == null)
+                return CommandResult.Fail(command, "NO_ACTIVE_SOURCE", "No active data source at apply time");
+
+            var applied = command.ValueKind switch
+            {
+                "float" => TryWriteFloat(command.Index, command.FloatValue, out var floatError)
+                    ? CommandResult.AppliedOk(command)
+                    : CommandResult.Fail(command, "APPLY_FAILED", floatError),
+                "int" => TryWriteInt(command.Index, command.IntValue, out var intError)
+                    ? CommandResult.AppliedOk(command)
+                    : CommandResult.Fail(command, "APPLY_FAILED", intError),
+                "bool" => TryWriteBool(command.Index, command.BoolValue, out var boolError)
+                    ? CommandResult.AppliedOk(command)
+                    : CommandResult.Fail(command, "APPLY_FAILED", boolError),
+                _ => CommandResult.Fail(command, "UNSUPPORTED_TARGET", $"Unsupported value kind: {command.ValueKind}")
+            };
+
+            return applied;
+        }
+        catch (Exception ex)
+        {
+            return CommandResult.Fail(command, "APPLY_EXCEPTION", ex.Message);
+        }
+    }
+
+    private static bool TryWriteFloat(int index, double value, out string error)
+    {
+        error = "";
+        var arr = GetDataArrayPtr(_cachedGf);
+        if (arr == IntPtr.Zero)
+        {
+            error = "Float array unavailable";
+            return false;
+        }
+        var maxLen = (long)Marshal.ReadInt64(arr, ArrayMaxLenOffset);
+        if (index < 0 || index >= maxLen)
+        {
+            error = $"Float index {index} out of range";
+            return false;
+        }
+        Marshal.WriteInt64(arr, ArrayDataOffset + 8 * index, BitConverter.DoubleToInt64Bits(value));
+        return true;
+    }
+
+    private static bool TryWriteInt(int index, int value, out string error)
+    {
+        error = "";
+        var arr = GetDataArrayPtr(_cachedGi);
+        if (arr == IntPtr.Zero)
+        {
+            error = "Int array unavailable";
+            return false;
+        }
+        var maxLen = (long)Marshal.ReadInt64(arr, ArrayMaxLenOffset);
+        if (index < 0 || index >= maxLen)
+        {
+            error = $"Int index {index} out of range";
+            return false;
+        }
+        Marshal.WriteInt32(arr, ArrayDataOffset + 4 * index, value);
+        return true;
+    }
+
+    private static bool TryWriteBool(int index, bool value, out string error)
+    {
+        error = "";
+        var arr = GetDataArrayPtr(_cachedGb);
+        if (arr == IntPtr.Zero)
+        {
+            error = "Bool array unavailable";
+            return false;
+        }
+        var maxLen = (long)Marshal.ReadInt64(arr, ArrayMaxLenOffset);
+        if (index < 0 || index >= maxLen)
+        {
+            error = $"Bool index {index} out of range";
+            return false;
+        }
+        Marshal.WriteByte(arr, ArrayDataOffset + index, (byte)(value ? 1 : 0));
+        return true;
     }
 
     // ─── Diagnostics ──────────────────────────────────────────────────────────
@@ -790,16 +866,16 @@ public static class GameBridge
 
     /// <summary>
     /// Returns a diagnostic snapshot of the sub-cache state and raw array data.
-    /// Used by <c>GET /api/debug</c> to verify native field offsets and data presence.
+    /// Used by WebSocket debug requests to verify native field offsets and data presence.
     /// <b>Must be called on the Unity main thread</b> — it invokes
     /// <see cref="DescribeArrayCache"/> which calls <c>Marshal.ReadIntPtr</c>.
-    /// HTTP callers must route through <see cref="RequestDebugSnapshot"/> /
+    /// Network callers must route through <see cref="RequestDebugSnapshot"/> /
     /// <see cref="GetDebugSnapshot"/> so the read is deferred to the main thread
     /// via <c>DrainPendingMainThreadOps</c>.
     /// </summary>
     public static object CollectDebugInfo()
     {
-        // NOTE: must NOT be called directly from the HTTP background thread.
+        // NOTE: must NOT be called directly from a network background thread.
         // DescribeArrayCache calls Marshal.ReadIntPtr which is main-thread only.
         // See DrainPendingMainThreadOps for the main-thread dispatch path.
         return new
@@ -824,7 +900,7 @@ public static class GameBridge
     /// Drop all cached game-object references.
     /// <b>Must be called on the Unity main thread</b> (e.g. from
     /// <c>OnSceneWasUnloaded</c> or from <see cref="DrainPendingMainThreadOps"/>).
-    /// HTTP callers should use <see cref="RequestInvalidate"/> instead.
+    /// Network callers should use <see cref="RequestInvalidate"/> instead.
     /// </summary>
     public static void InvalidateCache()
     {
@@ -837,10 +913,10 @@ public static class GameBridge
         _cachedBr = null;
         _cachedEm = null;
         _cachedNsp = null;
-        _dataFieldOffset = -1; // force re-detection on next SetDataSource call
+        _dataFieldOffset = DataFieldOffset;
     }
 
-    // ─── HTTP-thread request helpers ─────────────────────────────────────────
+    // ─── Network-thread request helpers ──────────────────────────────────────
 
     /// <summary>
     /// Schedules a cache invalidation to run on the Unity main thread at the
@@ -873,7 +949,7 @@ public static class GameBridge
     /// </summary>
     public static void DrainPendingMainThreadOps()
     {
-        // 1. Cache invalidation (e.g. from /api/invalidate).
+        // 1. Cache invalidation (e.g. from WebSocket invalidate).
         if (_pendingInvalidate)
         {
             _pendingInvalidate = false;
@@ -881,11 +957,20 @@ public static class GameBridge
             Plugin.Logger.Msg("[GameBridge] Cache invalidated via API request");
         }
 
-        // 2. Queued writes (from /api/write).
-        while (_pendingWrites.TryDequeue(out var action))
-            action();
+        // 2. Queued writes (from WebSocket).
+        while (_pendingWrites.TryDequeue(out var command))
+        {
+            var result = ApplyWriteCommand(command);
+            _completedWrites.Enqueue(result);
+            if (result.Ok)
+                Plugin.Logger.Msg($"[GameBridge] Command applied: {command.Id} {command.Target}.{command.Field}");
+            else
+                Plugin.Logger.Warning(
+                    $"[GameBridge] Command failed: {command.Id} {command.Target}.{command.Field} " +
+                    $"{result.Code}: {result.Message}");
+        }
 
-        // 3. Debug snapshot request (from /api/debug).
+        // 3. Debug snapshot request (from WebSocket debug).
         if (_debugRequested && _cachedDataSource != null)
         {
             _debugRequested = false;

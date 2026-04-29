@@ -46,6 +46,8 @@ public class TrainInfo
     public double Velocity { get; set; }
     /// <summary>Current speed (integer version).</summary>
     public int VelocityInt { get; set; }
+    /// <summary>Approximate acceleration in m/s², derived from successive telemetry snapshots.</summary>
+    public double Acceleration { get; set; }
     /// <summary>Target/new speed in km/h.</summary>
     public double NewSpeed { get; set; }
     /// <summary>Total distance driven in km.</summary>
@@ -110,6 +112,10 @@ public class ElectricalInfo
     public double CurrentVoltageRatio { get; set; }
     /// <summary>Pantograph pressure (bar).</summary>
     public double PantographPressure { get; set; }
+    /// <summary>Low-voltage status value reported by the Pyscreen source.</summary>
+    public double LowVoltageStatus { get; set; }
+    /// <summary>Pantograph compressor status value reported by the Pyscreen source.</summary>
+    public double PantographCompressorStatus { get; set; }
     /// <summary>Converter on.</summary>
     public bool Converter { get; set; }
     /// <summary>AC power status.</summary>
@@ -152,6 +158,8 @@ public class DoorInfo
 {
     /// <summary>Overall door status.</summary>
     public bool Doors { get; set; }
+    /// <summary>Raw "doors_no" state from the EMU Pyscreen source.</summary>
+    public bool DoorsNo { get; set; }
     /// <summary>Left doors open.</summary>
     public bool DoorsLeft { get; set; }
     /// <summary>Right doors open.</summary>
@@ -189,6 +197,10 @@ public class ControlInfo
     public bool Sanding { get; set; }
     /// <summary>Solo drive active.</summary>
     public int SoloDriveActive { get; set; }
+    /// <summary>Silent mode active.</summary>
+    public int SilentModeActive { get; set; }
+    /// <summary>HVAC active state.</summary>
+    public int HvacActive { get; set; }
     /// <summary>Front lights setting.</summary>
     public int LightsFront { get; set; }
     /// <summary>Rear lights setting.</summary>
@@ -237,6 +249,12 @@ public class EnvironmentInfo
     public int RadioChannel { get; set; }
     /// <summary>Radio volume.</summary>
     public double RadioVolume { get; set; }
+    /// <summary>Radio noise flag.</summary>
+    public bool RadioNoise { get; set; }
+    /// <summary>Radio night-mode flag.</summary>
+    public bool RadioNightMode { get; set; }
+    /// <summary>Radio volume-adjust mode flag.</summary>
+    public bool RadioVolumeMode { get; set; }
     /// <summary>Screen brightness.</summary>
     public int ScreenBrightness { get; set; }
 }
@@ -261,6 +279,77 @@ public class ControlCommand
     /// Value to set (will be parsed to appropriate type).
     /// </summary>
     public object? Value { get; set; }
+}
+
+/// <summary>
+/// Validated write command queued by WebSocket network handlers and applied
+/// later by the Unity main thread.
+/// </summary>
+public class QueuedWriteCommand
+{
+    public string Id { get; set; } = "";
+    public string? ClientId { get; set; }
+    public string Target { get; set; } = "";
+    public string Field { get; set; } = "";
+    public string ValueKind { get; set; } = "";
+    public int Index { get; set; }
+    public double FloatValue { get; set; }
+    public int IntValue { get; set; }
+    public bool BoolValue { get; set; }
+    public DateTime QueuedAtUtc { get; set; } = DateTime.UtcNow;
+
+    public object Value => ValueKind switch
+    {
+        "float" => FloatValue,
+        "int" => IntValue,
+        "bool" => BoolValue,
+        _ => ""
+    };
+}
+
+/// <summary>
+/// Result produced by the Unity main thread after a queued write has been
+/// applied or rejected at apply time.
+/// </summary>
+public class CommandResult
+{
+    public string Type { get; set; } = "commandResult";
+    public string Id { get; set; } = "";
+    public string? ClientId { get; set; }
+    public bool Ok { get; set; }
+    public bool Queued { get; set; } = true;
+    public bool Applied { get; set; }
+    public string? Code { get; set; }
+    public string? Message { get; set; }
+    public string? Target { get; set; }
+    public string? Field { get; set; }
+    public object? Value { get; set; }
+    public long TimestampUnixMs { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+    public static CommandResult AppliedOk(QueuedWriteCommand command) => new()
+    {
+        Id = command.Id,
+        ClientId = command.ClientId,
+        Ok = true,
+        Applied = true,
+        Target = command.Target,
+        Field = command.Field,
+        Value = command.Value,
+        Message = "Command applied on Unity main thread"
+    };
+
+    public static CommandResult Fail(QueuedWriteCommand command, string code, string message) => new()
+    {
+        Id = command.Id,
+        ClientId = command.ClientId,
+        Ok = false,
+        Applied = false,
+        Code = code,
+        Message = message,
+        Target = command.Target,
+        Field = command.Field,
+        Value = command.Value
+    };
 }
 
 /// <summary>

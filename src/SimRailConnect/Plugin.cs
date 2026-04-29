@@ -16,30 +16,27 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 using System;
-using HarmonyLib;
 using MelonLoader;
 
-// MelonLoader mod registration — must be at assembly scope (outside any namespace).
+// MelonLoader plugin registration — must be at assembly scope (outside any namespace).
 [assembly: MelonInfo(typeof(SimRailConnect.Plugin), SimRailConnect.Plugin.PluginName, SimRailConnect.Plugin.PluginVersion, "rinnyanneko")]
 [assembly: MelonGame]
 
 namespace SimRailConnect;
 
-public class Plugin : MelonMod
+public class Plugin : MelonPlugin
 {
     public const string PluginName = "SimRailConnect";
     public const string PluginVersion = "1.0.0";
 
     /// <summary>
-    /// Per-mod logger instance.  Assigned once in <see cref="OnInitializeMelon"/>
-    /// so that <c>GameBridge</c>, <c>TelemetryMonitor</c> and <c>HttpApiServer</c>
-    /// can write structured log entries without importing MelonLoader directly.
+    /// Per-plugin logger instance.  Assigned once in <see cref="OnInitializeMelon"/>
+    /// so that <c>WebSocketApiServer</c> can write structured log entries
+    /// without importing MelonLoader directly.
     /// </summary>
     internal static MelonLogger.Instance Logger = null!;
 
-    internal static HttpApiServer? ApiServer { get; private set; }
-
-    private HarmonyLib.Harmony? _harmony;
+    internal static WebSocketApiServer? WebSocketServer { get; private set; }
 
     public override void OnInitializeMelon()
     {
@@ -51,51 +48,65 @@ public class Plugin : MelonMod
             // ── Read config (UserData/MelonPreferences.cfg) ───────────────────
             var category = MelonPreferences.CreateCategory("SimRailConnect");
 
-            var port = category.CreateEntry(
-                "Port", 5555,
-                "HTTP API server port");
-
             var updateInterval = category.CreateEntry(
                 "UpdateIntervalMs", 100,
                 "Telemetry update interval in milliseconds");
 
-            var enableWrite = category.CreateEntry(
-                "EnableWriteApi", true,
-                "Allow external programs to modify game state via POST /api/write");
+            var webSocketPort = category.CreateEntry(
+                "WebSocketPort", 5556,
+                "Local WebSocket API server port");
+
+            var webSocketMaxClients = category.CreateEntry(
+                "WebSocketMaxClients", 3,
+                "Maximum concurrent WebSocket clients");
+
+            var webSocketDefaultRateHz = category.CreateEntry(
+                "WebSocketDefaultRateHz", 10,
+                "Default WebSocket telemetry push rate in Hz");
+
+            var webSocketMaxRateHz = category.CreateEntry(
+                "WebSocketMaxRateHz", 20,
+                "Maximum per-client WebSocket telemetry push rate in Hz");
+
+            var webSocketPayloadLimitBytes = category.CreateEntry(
+                "WebSocketPayloadLimitBytes", 16384,
+                "Maximum inbound WebSocket JSON payload size in bytes");
+
+            var webSocketCommandRateLimit = category.CreateEntry(
+                "WebSocketCommandRateLimitPerSecond", 5,
+                "Maximum WebSocket write commands per client per second");
+
+            var webSocketReadOnly = category.CreateEntry(
+                "WebSocketReadOnly", false,
+                "Disable WebSocket write commands while keeping telemetry push enabled");
+
+            var enableTelemetryPatch = category.CreateEntry(
+                "EnableTelemetryPatch", false,
+                "Reserved for a future native telemetry assembly. This managed plugin never patches IL2CPP.");
+
+            var apiToken = category.CreateEntry(
+                "ApiToken", "",
+                "Optional token required by WebSocket clients; blank disables token auth");
 
             TelemetryState.UpdateIntervalMs = updateInterval.Value;
 
-            // ── Start HTTP API server ─────────────────────────────────────────
-            ApiServer = new HttpApiServer(port.Value, enableWrite.Value);
-            ApiServer.Start();
+            WebSocketServer = new WebSocketApiServer(
+                webSocketPort.Value,
+                webSocketMaxClients.Value,
+                webSocketDefaultRateHz.Value,
+                webSocketMaxRateHz.Value,
+                webSocketPayloadLimitBytes.Value,
+                apiToken.Value);
+            WebSocketServer.Start();
 
-            Logger.Msg($"HTTP API server started on {ApiServer.BoundPrefix}");
+            Logger.Msg($"WebSocket API server started on {WebSocketServer.Url}");
             Logger.Msg($"Telemetry update interval: {updateInterval.Value}ms");
-            Logger.Msg($"Write API: {(enableWrite.Value ? "ENABLED" : "DISABLED")}");
+            Logger.Msg($"WebSocket write mode: {(webSocketReadOnly.Value ? "READ-ONLY" : "READ/WRITE")}");
 
-            // ── Apply Harmony patches ─────────────────────────────────────────
-            //
-            // We patch Pyscreen.Update() (the game's WASM instrument-panel update
-            // loop) instead of using ClassInjector.RegisterTypeInIl2Cpp<T>().
-            //
-            // Why: ClassInjector installs a GLOBAL IL2CPP hook
-            // (Class_GetFieldDefaultValue_Hook) that intercepts field-default-value
-            // queries for ALL classes during every scene load.  On specific scene
-            // transitions in SimRail (train approaching the player, missions that
-            // spawn the player outside the cab) the Il2CppFieldInfo* stored by that
-            // hook becomes a dangling pointer and the runtime crashes with
-            // AccessViolationException — even when the injected class has zero
-            // instance fields.  Removing ClassInjector entirely removes the hook
-            // and the crash is gone.
-            //
-            // Patching Pyscreen.Update() gives us:
-            //   • A guaranteed main-thread callback every frame while in the cab.
-            //   • The live VehiclePyscreenDataSource reference (via __instance.Source).
-            //   • No IL2CPP class injection at all → no hook → no crash.
-            _harmony = new HarmonyLib.Harmony("com.simrailconnect.api");
-            _harmony.PatchAll(typeof(Plugin).Assembly);
+            if (enableTelemetryPatch.Value)
+                Logger.Warning("EnableTelemetryPatch is ignored by this managed-only plugin build.");
+            Logger.Warning("Native telemetry disabled: managed WebSocket plugin build has no IL2CPP/Harmony references.");
 
-            Logger.Msg("Harmony patches applied (Pyscreen.Update hooked)");
             Logger.Msg($"{PluginName} loaded successfully!");
         }
         catch (Exception ex)
@@ -107,52 +118,11 @@ public class Plugin : MelonMod
     public override void OnDeinitializeMelon()
     {
         Logger.Msg($"{PluginName} unloading...");
-        ApiServer?.Stop();
-        _harmony?.UnpatchSelf();
-        GameBridge.InvalidateCache();
+        WebSocketServer?.Stop();
     }
 
-    // ── Scene lifecycle ───────────────────────────────────────────────────────
-    //
-    // When the game loads a scene in which the player spawns on a platform
-    // (i.e. outside the cab), the previously-cached VehiclePyscreenDataSource
-    // and its sub-objects belong to the scene being destroyed.  If a train
-    // happens to approach at that moment, Pyscreen.Update() fires on the
-    // incoming train before our cache is refreshed, and accessing the stale
-    // sub-cache pointers causes an AccessViolationException.
-    //
-    // Invalidating the cache in OnSceneWasUnloaded guarantees that all dangling
-    // native-object references are cleared before any new Pyscreen.Update() tick
-    // can run, because MelonLoader calls this callback from the Unity main thread
-    // during the scene-unload sequence — before new objects are spawned.
-
-    // Terrain-chunk scenes (world streamer tiles) fire the same callbacks as
-    // major scenes but are irrelevant for telemetry.  We still call
-    // InvalidateCache() on unload (safety), but suppress log noise.
-    private static bool IsTerrainChunk(string sceneName) =>
-        sceneName.Contains("_terrain_");
-
-    public override void OnSceneWasUnloaded(int buildIndex, string sceneName)
-    {
-        // Terrain-chunk scenes are pure geometry tiles — they never own
-        // VehiclePyscreenDataSource or any train objects. Calling InvalidateCache()
-        // on every tile swap would reset _dataFieldOffset every ~1 second while
-        // driving, forcing a new Marshal.ReadIntPtr probe loop every tick and
-        // eventually triggering an AccessViolationException on a garbage pointer.
-        if (IsTerrainChunk(sceneName)) return;
-        Logger.Msg($"[Scene] Unloaded '{sceneName}' (index={buildIndex}) — invalidating telemetry cache");
-        GameBridge.InvalidateCache();
-    }
-
-    public override void OnSceneWasLoaded(int buildIndex, string sceneName)
-    {
-        if (!IsTerrainChunk(sceneName))
-            Logger.Msg($"[Scene] Loaded '{sceneName}' (index={buildIndex})");
-    }
-
-    public override void OnSceneWasInitialized(int buildIndex, string sceneName)
-    {
-        if (!IsTerrainChunk(sceneName))
-            Logger.Msg($"[Scene] Initialized '{sceneName}' (index={buildIndex}) — ready for telemetry");
-    }
+    // MelonPlugin intentionally avoids MelonMod scene callbacks and support
+    // components. On this SimRail/MelonLoader build, the IL2CPP support-module
+    // field-default hook can crash during WorldStreamerPlayer startup even when
+    // our telemetry Harmony patch is disabled.
 }
