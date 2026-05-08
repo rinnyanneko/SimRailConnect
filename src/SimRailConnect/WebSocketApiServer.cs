@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /*
     SimRailConnect
     Copyright © 2026 rinnyanneko
@@ -32,9 +33,9 @@ namespace SimRailConnect;
 
 /// <summary>
 /// Local WebSocket telemetry server.
-/// This managed-only build never touches Unity, IL2CPP wrappers, native pointers,
-/// Harmony, or Marshal. Native telemetry is intentionally disabled until it can
-/// be isolated into a separate optional assembly.
+/// WebSocket callbacks are background-thread code, so this class only reads
+/// TelemetryState snapshots. Unity and IL2CPP access belongs to the main-thread
+/// Pyscreen collector.
 /// </summary>
 public sealed class WebSocketApiServer
 {
@@ -251,7 +252,7 @@ public sealed class WebSocketApiServer
                 break;
 
             case "invalidate":
-                await SendNativeTelemetryDisabledAsync(client, id).ConfigureAwait(false);
+                await HandleInvalidateAsync(client, id).ConfigureAwait(false);
                 break;
 
             case "debug":
@@ -271,6 +272,31 @@ public sealed class WebSocketApiServer
     private async Task HandleDebugAsync(ClientConnection client, string? id)
     {
         await SendNativeTelemetryDisabledAsync(client, id).ConfigureAwait(false);
+    }
+
+    private async Task HandleInvalidateAsync(ClientConnection client, string? id)
+    {
+        var command = new TelemetryCommand
+        {
+            Id = id ?? Guid.NewGuid().ToString("N"),
+            Kind = TelemetryCommandKind.InvalidateTelemetry,
+            Reason = "WebSocket invalidate request"
+        };
+
+        if (!TelemetryCommandQueue.TryEnqueue(command, out var error))
+        {
+            await SendCommandQueueFullAsync(client, id, error).ConfigureAwait(false);
+            return;
+        }
+
+        await SendAsync(client, new
+        {
+            type = "ack",
+            id,
+            ok = true,
+            status = "queued",
+            queuedCommands = TelemetryCommandQueue.Count
+        }).ConfigureAwait(false);
     }
 
     private void HandleSubscribe(ClientConnection client, JsonElement root)
@@ -301,7 +327,183 @@ public sealed class WebSocketApiServer
 
     private async Task HandleCommandAsync(ClientConnection client, JsonElement root, string? id)
     {
-        await SendNativeTelemetryDisabledAsync(client, id).ConfigureAwait(false);
+        if (!TryParseCommand(root, id, out var command, out var error))
+        {
+            await SendErrorAsync(client, id, "INVALID_COMMAND", error).ConfigureAwait(false);
+            return;
+        }
+
+        if (!TelemetryCommandQueue.TryEnqueue(command, out error))
+        {
+            await SendCommandQueueFullAsync(client, id, error).ConfigureAwait(false);
+            return;
+        }
+
+        await SendAsync(client, new
+        {
+            type = "ack",
+            id,
+            ok = true,
+            status = "queued",
+            command = string.IsNullOrWhiteSpace(command.Action) ? command.Target : command.Action,
+            field = command.Field,
+            index = command.Index,
+            instance = command.Instance,
+            queuedCommands = TelemetryCommandQueue.Count
+        }).ConfigureAwait(false);
+    }
+
+    private static bool TryParseCommand(
+        JsonElement root,
+        string? id,
+        out TelemetryCommand command,
+        out string error)
+    {
+        command = null!;
+        error = "";
+
+        var commandName = NormalizeDriverCommand(TryGetString(root, "command") ?? TryGetString(root, "action"));
+        if (!string.IsNullOrWhiteSpace(commandName))
+            return TryParseDriverControl(root, id, commandName, out command, out error);
+
+        return TryParsePyscreenWrite(root, id, out command, out error);
+    }
+
+    private static bool TryParseDriverControl(
+        JsonElement root,
+        string? id,
+        string action,
+        out TelemetryCommand command,
+        out string error)
+    {
+        command = null!;
+        error = "";
+
+        var value = 0.0;
+        var boolValue = false;
+        var requiresNumericValue = DriverCommandRequiresNumericValue(action);
+        if (root.TryGetProperty("value", out var valueElement))
+        {
+            if (valueElement.ValueKind == JsonValueKind.True || valueElement.ValueKind == JsonValueKind.False)
+            {
+                if (requiresNumericValue)
+                {
+                    error = "Driver command value must be numeric";
+                    return false;
+                }
+
+                boolValue = valueElement.GetBoolean();
+            }
+            else if (valueElement.TryGetDouble(out var parsedValue))
+            {
+                value = parsedValue;
+                boolValue = Math.Abs(parsedValue) > double.Epsilon;
+            }
+            else
+            {
+                error = "Driver command value must be boolean or number";
+                return false;
+            }
+        }
+        else
+        {
+            if (requiresNumericValue)
+            {
+                error = "Driver command requires numeric value";
+                return false;
+            }
+
+            boolValue = true;
+        }
+
+        command = new TelemetryCommand
+        {
+            Id = id ?? Guid.NewGuid().ToString("N"),
+            Kind = TelemetryCommandKind.DriverControl,
+            Action = action,
+            NumberValue = value,
+            BoolValue = boolValue
+        };
+        return true;
+    }
+
+    private static bool TryParsePyscreenWrite(
+        JsonElement root,
+        string? id,
+        out TelemetryCommand command,
+        out string error)
+    {
+        command = null!;
+        error = "";
+
+        var target = NormalizeCommandTarget(TryGetString(root, "target") ?? TryGetString(root, "group"));
+        if (target is not ("eimpcBool" or "eimpcInt" or "eimpcFloat"))
+        {
+            error = "Command requires a known action, or target must be eimpcBool, eimpcInt, or eimpcFloat";
+            return false;
+        }
+
+        var field = TryGetString(root, "field");
+        int? index = null;
+        if (root.TryGetProperty("index", out var indexElement))
+        {
+            if (!indexElement.TryGetInt32(out var parsedIndex) || parsedIndex < 0)
+            {
+                error = "Command index must be a non-negative integer";
+                return false;
+            }
+
+            index = parsedIndex;
+        }
+
+        if (string.IsNullOrWhiteSpace(field) && index == null)
+        {
+            error = "Command requires field or index";
+            return false;
+        }
+
+        var instance = 0;
+        if (root.TryGetProperty("instance", out var instanceElement) && instanceElement.TryGetInt32(out var parsedInstance))
+            instance = Math.Max(0, parsedInstance);
+
+        if (!root.TryGetProperty("value", out var valueElement))
+        {
+            error = "Command requires value";
+            return false;
+        }
+
+        var numberValue = 0.0;
+        var boolValue = false;
+        if (target == "eimpcBool")
+        {
+            if (valueElement.ValueKind == JsonValueKind.True || valueElement.ValueKind == JsonValueKind.False)
+                boolValue = valueElement.GetBoolean();
+            else if (valueElement.TryGetDouble(out var boolNumber))
+                boolValue = Math.Abs(boolNumber) > double.Epsilon;
+            else
+            {
+                error = "eimpcBool value must be boolean or number";
+                return false;
+            }
+        }
+        else if (!valueElement.TryGetDouble(out numberValue))
+        {
+            error = $"{target} value must be numeric";
+            return false;
+        }
+
+        command = new TelemetryCommand
+        {
+            Id = id ?? Guid.NewGuid().ToString("N"),
+            Kind = TelemetryCommandKind.PyscreenWrite,
+            Target = target,
+            Field = string.IsNullOrWhiteSpace(field) ? null : field,
+            Index = index,
+            Instance = instance,
+            NumberValue = numberValue,
+            BoolValue = boolValue
+        };
+        return true;
     }
 
     private async Task BroadcastLoopAsync(CancellationToken token)
@@ -348,13 +550,27 @@ public sealed class WebSocketApiServer
         await SendAsync(client, new { type = "error", id, code, message }).ConfigureAwait(false);
     }
 
+    private async Task SendCommandQueueFullAsync(ClientConnection client, string? id, string message)
+    {
+        await SendAsync(client, new
+        {
+            type = "error",
+            id,
+            ok = false,
+            error = "COMMAND_QUEUE_FULL",
+            code = "COMMAND_QUEUE_FULL",
+            message,
+            currentQueueSize = TelemetryCommandQueue.Count
+        }).ConfigureAwait(false);
+    }
+
     private async Task SendNativeTelemetryDisabledAsync(ClientConnection client, string? id)
     {
         await SendErrorAsync(
             client,
             id,
             "NATIVE_TELEMETRY_DISABLED",
-            "Native telemetry is not included in this managed-only plugin build").ConfigureAwait(false);
+            "Native diagnostics are disabled in this build").ConfigureAwait(false);
     }
 
     private async Task SendAsync(ClientConnection client, object payload)
@@ -445,7 +661,8 @@ public sealed class WebSocketApiServer
         "status" => new
         {
             snapshot.IsActive,
-            snapshot.Timestamp
+            snapshot.Timestamp,
+            snapshot.Status
         },
         _ => null
     };
@@ -457,6 +674,50 @@ public sealed class WebSocketApiServer
 
     private static string NormalizeChannel(string? channel) =>
         (channel ?? "").Trim().ToLowerInvariant();
+
+    private static string NormalizeCommandTarget(string? value)
+    {
+        return (value ?? "").Trim().ToLowerInvariant() switch
+        {
+            "setpyscreenbool" or "setpyscreeneimpcbool" or "eimpcbool" => "eimpcBool",
+            "setpyscreenint" or "setpyscreeneimpcint" or "eimpcint" => "eimpcInt",
+            "setpyscreenfloat" or "setpyscreeneimpcfloat" or "eimpcfloat" => "eimpcFloat",
+            var other => other
+        };
+    }
+
+    private static string NormalizeDriverCommand(string? value)
+    {
+        return (value ?? "").Trim().ToLowerInvariant() switch
+        {
+            "emergencybrake" or "emergency_brake" or "eb" => "emergencyBrake",
+            "nopowerandbrake" or "no_power_and_brake" => "noPowerAndBrake",
+            "setpower" or "power" or "traction" => "setPower",
+            "setbrake" or "brake" or "trainbrake" => "setBrake",
+            "setlocalbrake" or "localbrake" or "locomotivebrake" => "setLocalBrake",
+            "setthirdbrake" or "thirdbrake" or "epbrake" => "setThirdBrake",
+            "setedbrake" or "edbrake" => "setEdBrake",
+            "setdirection" or "direction" => "setDirection",
+            "setspeedtarget" or "speedtarget" or "cruise" or "atospeed" => "setSpeedTarget",
+            "alerter" or "security" or "securitysystem" or "shp" or "ca" => "securityAcknowledge",
+            "sanding" or "setsanding" => "setSanding",
+            "horn" => "horn",
+            "radiostop" => "radioStop",
+            "etcsack" or "etcs_ack" => "etcsAck",
+            "springbrake" or "setspringbrake" => "setSpringBrake",
+            "vcb" or "mainswitch" or "setvcb" => "setVcb",
+            "battery" or "setbattery" => "setBattery",
+            "converter" or "setconverter" => "setConverter",
+            "compressor" or "setcompressor" => "setCompressor",
+            "pantographfront" or "frontpantograph" or "setfrontpantograph" => "setFrontPantograph",
+            "pantographrear" or "rearpantograph" or "setrearpantograph" => "setRearPantograph",
+            _ => ""
+        };
+    }
+
+    private static bool DriverCommandRequiresNumericValue(string action) =>
+        action is "setPower" or "setBrake" or "setLocalBrake" or "setThirdBrake" or
+            "setEdBrake" or "setDirection" or "setSpeedTarget";
 
     private static string? TryGetString(JsonElement root, string name)
     {
@@ -477,9 +738,6 @@ public sealed class WebSocketApiServer
         private HashSet<string> _channels = new(StringComparer.OrdinalIgnoreCase);
         private int _rateHz;
         private DateTime _nextSendUtc = DateTime.UtcNow;
-        private DateTime _commandWindowUtc = DateTime.UtcNow;
-        private int _commandCount;
-
         public ClientConnection(WebSocket socket, int defaultRateHz, int maxRateHz)
         {
             Socket = socket;
@@ -515,25 +773,6 @@ public sealed class WebSocketApiServer
                 var now = DateTime.UtcNow;
                 if (now < _nextSendUtc) return false;
                 _nextSendUtc = now.AddMilliseconds(1000.0 / Math.Max(1, _rateHz));
-                return true;
-            }
-        }
-
-        public bool TryConsumeCommandSlot(int limitPerSecond)
-        {
-            lock (_gate)
-            {
-                var now = DateTime.UtcNow;
-                if ((now - _commandWindowUtc).TotalSeconds >= 1)
-                {
-                    _commandWindowUtc = now;
-                    _commandCount = 0;
-                }
-
-                if (_commandCount >= limitPerSecond)
-                    return false;
-
-                _commandCount++;
                 return true;
             }
         }

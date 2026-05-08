@@ -1,4 +1,6 @@
 <!--
+    SPDX-License-Identifier: GPL-3.0-or-later
+
     SimRailConnect
     Copyright © 2026 rinnyanneko
 
@@ -25,39 +27,65 @@
 
     <AssemblyName>SimRailConnect</AssemblyName>
     <RootNamespace>SimRailConnect</RootNamespace>
-    <Version>0.1.0</Version>
-    <Description>Managed-only MelonLoader plugin that exposes a local WebSocket API</Description>
+    <Version>0.0.1</Version>
+    <Description>SimRail MelonLoader mod that exposes local WebSocket telemetry</Description>
 
-    <!-- SimRail game directory - adjust if your install path differs -->
-    <GameDir>F:\SteamLibrary\steamapps\common\SimRail</GameDir>
+    <!--
+      SimRail game directory - override this on developer machines.
+      Example:
+        dotnet build SimRail.sln -p:GameDir="F:\SteamLibrary\steamapps\common\SimRail"
+    -->
+    <GameDir Condition="'$(GameDir)' == ''">F:\SteamLibrary\steamapps\common\SimRail</GameDir>
+    <MelonLoaderPath Condition="'$(MelonLoaderPath)' == ''">$(GameDir)\MelonLoader\net6\MelonLoader.dll</MelonLoaderPath>
+    <Il2CppAssembliesPath Condition="'$(Il2CppAssembliesPath)' == ''">$(GameDir)\MelonLoader\Il2CppAssemblies</Il2CppAssembliesPath>
 
     <!-- Don't copy reference assemblies to output -->
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="Exists('$(MelonLoaderPath)') and Exists('$(Il2CppAssembliesPath)\Assembly-CSharp.dll')">
     <!-- MelonLoader core -->
     <Reference Include="MelonLoader" Private="false">
-      <HintPath>$(GameDir)\MelonLoader\net6\MelonLoader.dll</HintPath>
+      <HintPath>$(MelonLoaderPath)</HintPath>
     </Reference>
-
+    <Reference Include="Il2CppInterop.Runtime" Private="false">
+      <HintPath>$(GameDir)\MelonLoader\net6\Il2CppInterop.Runtime.dll</HintPath>
+    </Reference>
+    <Reference Include="Assembly-CSharp" Private="false">
+      <HintPath>$(Il2CppAssembliesPath)\Assembly-CSharp.dll</HintPath>
+    </Reference>
+    <Reference Include="Il2Cppmscorlib" Private="false">
+      <HintPath>$(Il2CppAssembliesPath)\Il2Cppmscorlib.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule" Private="false">
+      <HintPath>$(Il2CppAssembliesPath)\UnityEngine.CoreModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule" Private="false">
+      <HintPath>$(Il2CppAssembliesPath)\UnityEngine.PhysicsModule.dll</HintPath>
+    </Reference>
   </ItemGroup>
+
+  <PropertyGroup Condition="Exists('$(MelonLoaderPath)') and Exists('$(Il2CppAssembliesPath)\Assembly-CSharp.dll')">
+    <DefineConstants>$(DefineConstants);SIMRAIL_IL2CPP</DefineConstants>
+  </PropertyGroup>
 
   <ItemGroup>
-    <!-- Native telemetry is excluded from the managed-only plugin build.
-         Keeping these files out also keeps IL2CPP/Harmony references out of
-         assembly metadata, avoiding MelonLoader support-module injection. -->
-    <Compile Remove="GameBridge.cs" />
-    <Compile Remove="TelemetryMonitor.cs" />
-    <Compile Remove="ApiCommandRegistry.cs" />
+    <Compile Remove="DevStubs\**\*.cs" />
   </ItemGroup>
 
-  <!-- Convenience: copy plugin DLL to Plugins/ folder after a successful build -->
-  <Target Name="CopyToPlugins" AfterTargets="Build"
-          Condition="Exists('$(GameDir)\Plugins')">
+  <ItemGroup Condition=" '$(SIMRAIL_IL2CPP)' != 'true' ">
+    <Compile Include="DevStubs\**\*.cs" />
+  </ItemGroup>
+
+  <Target Name="WarnWhenUsingMelonLoaderStubs" BeforeTargets="CoreCompile" Condition="!Exists('$(MelonLoaderPath)')">
+    <Warning Text="MelonLoader.dll was not found at '$(MelonLoaderPath)'. Building with compile-only development stubs; the output is not a loadable MelonLoader mod until built against the real MelonLoader.dll." />
+  </Target>
+
+  <Target Name="CopyToMods" AfterTargets="Build"
+          Condition="Exists('$(MelonLoaderPath)') and Exists('$(GameDir)\Mods')">
     <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll"
-          DestinationFolder="$(GameDir)\Plugins\"
+          DestinationFolder="$(GameDir)\Mods\"
           SkipUnchangedFiles="true" />
-    <Message Text="Copied $(AssemblyName).dll → $(GameDir)\Plugins\" Importance="high" />
+    <Message Text="Copied $(AssemblyName).dll → $(GameDir)\Mods\" Importance="high" />
   </Target>
 </Project>
