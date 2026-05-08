@@ -63,7 +63,15 @@ public static class TelemetryCommandQueue
             }
         } while (Interlocked.CompareExchange(ref _count, current + 1, current) != current);
 
-        Queue.Enqueue(command);
+        try
+        {
+            Queue.Enqueue(command);
+        }
+        catch
+        {
+            Interlocked.Decrement(ref _count);
+            throw;
+        }
         error = "";
         return true;
     }

@@ -307,7 +307,7 @@ internal sealed class PyscreenTelemetryCollector
             if (command.Kind == TelemetryCommandKind.InvalidateTelemetry)
             {
                 Invalidate(command.Reason);
-                return;
+                continue;
             }
             Plugin.Logger.Warning($"Command {command.Id} discarded: no telemetry source available.");
         }
