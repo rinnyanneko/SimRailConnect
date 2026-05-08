@@ -73,7 +73,7 @@
     <Compile Remove="DevStubs\**\*.cs" />
   </ItemGroup>
 
-  <ItemGroup Condition="!Exists('$(MelonLoaderPath)')">
+  <ItemGroup Condition=" '$(SIMRAIL_IL2CPP)' != 'true' ">
     <Compile Include="DevStubs\**\*.cs" />
   </ItemGroup>
 
