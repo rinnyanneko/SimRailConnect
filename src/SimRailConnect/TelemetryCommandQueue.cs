@@ -18,6 +18,7 @@
 */
 using System;
 using System.Collections.Concurrent;
+using System.Threading;
 
 namespace SimRailConnect;
 
@@ -46,14 +47,21 @@ public static class TelemetryCommandQueue
 {
     private const int MaxQueuedCommands = 128;
     private static readonly ConcurrentQueue<TelemetryCommand> Queue = new();
+    private static int _count;
 
     public static bool TryEnqueue(TelemetryCommand command, out string error)
     {
-        if (Queue.Count >= MaxQueuedCommands)
+        // CAS loop: atomically reserve a slot without O(n) Count snapshot
+        int current;
+        do
         {
-            error = "Command queue is full";
-            return false;
-        }
+            current = Volatile.Read(ref _count);
+            if (current >= MaxQueuedCommands)
+            {
+                error = "Command queue is full";
+                return false;
+            }
+        } while (Interlocked.CompareExchange(ref _count, current + 1, current) != current);
 
         Queue.Enqueue(command);
         error = "";
@@ -62,8 +70,13 @@ public static class TelemetryCommandQueue
 
     public static bool TryDequeue(out TelemetryCommand? command)
     {
-        return Queue.TryDequeue(out command);
+        if (Queue.TryDequeue(out command))
+        {
+            Interlocked.Decrement(ref _count);
+            return true;
+        }
+        return false;
     }
 
-    public static int Count => Queue.Count;
+    public static int Count => Volatile.Read(ref _count);
 }

@@ -101,6 +101,9 @@ internal sealed class PyscreenTelemetryCollector
             var source = GetSource(now);
             if (source == null)
             {
+                // Drain invalidate commands so clients can still force a cache reset
+                // when no source has been found yet; discard other commands.
+                DrainWithoutSource();
                 TelemetryState.PublishSnapshot(TelemetrySnapshot.CreateInactive("Waiting for VehiclePyscreenDataSource."));
                 return;
             }
@@ -291,6 +294,23 @@ internal sealed class PyscreenTelemetryCollector
                 ScreenBrightness = Read(generalInt, IntIndex.ScreenBrightness)
             }
         };
+    }
+
+    private void DrainWithoutSource()
+    {
+        var processed = 0;
+        while (processed < MaxCommandsPerTick && TelemetryCommandQueue.TryDequeue(out var command))
+        {
+            if (command == null)
+                continue;
+            processed++;
+            if (command.Kind == TelemetryCommandKind.InvalidateTelemetry)
+            {
+                Invalidate(command.Reason);
+                return;
+            }
+            Plugin.Logger.Warning($"Command {command.Id} discarded: no telemetry source available.");
+        }
     }
 
     private bool DrainCommands(VehiclePyscreenDataSource source)
