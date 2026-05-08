@@ -43,7 +43,7 @@
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
-  <ItemGroup Condition="Exists('$(MelonLoaderPath)')">
+  <ItemGroup Condition="Exists('$(MelonLoaderPath)') and Exists('$(Il2CppAssembliesPath)\Assembly-CSharp.dll')">
     <!-- MelonLoader core -->
     <Reference Include="MelonLoader" Private="false">
       <HintPath>$(MelonLoaderPath)</HintPath>
