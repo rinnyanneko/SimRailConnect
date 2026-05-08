@@ -327,6 +327,7 @@ internal sealed class PyscreenTelemetryCollector
                 if (command.Kind == TelemetryCommandKind.InvalidateTelemetry)
                 {
                     Invalidate(command.Reason);
+                    TelemetryState.PublishSnapshot(TelemetrySnapshot.CreateInactive("Telemetry cache invalidated; waiting for new VehiclePyscreenDataSource."));
                     return true;
                 }
 

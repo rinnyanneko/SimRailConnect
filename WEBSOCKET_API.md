@@ -21,7 +21,7 @@ Command messages are also handled safely: WebSocket handlers validate and queue 
 
 Most client requests may include an optional string `id`. The server echoes this value in the response so clients can match responses to requests. SimRailConnect does not interpret `id` as a train id, game object id, command id, or session id.
 
-Using `id` is strongly recommended when sending multiple requests or commands quickly.
+If `id` is omitted, responses include `"id": null`. To correlate responses to requests, always provide an `id`.
 
 Disabled messages:
 
@@ -152,6 +152,7 @@ Response:
   "seq": 12346,
   "timestampUnixMs": 1714300000100,
   "data": {
+    "timestamp": "2024-04-28T11:06:40Z",
     "isActive": true,
     "status": "OK",
     "train": {},
@@ -309,7 +310,19 @@ Invalidation is queued and applied on the Unity main thread.
 }
 ```
 
-Successful invalidation returns the same queued `ack` shape as commands. If the command queue is full, invalidation fails with `COMMAND_QUEUE_FULL`; clients should retry with backoff.
+Successful invalidation returns:
+
+```json
+{
+  "type": "ack",
+  "id": "inv-001",
+  "ok": true,
+  "status": "queued",
+  "queuedCommands": 1
+}
+```
+
+If the command queue is full, invalidation fails with `COMMAND_QUEUE_FULL`; clients should retry with backoff.
 
 ```json
 {
