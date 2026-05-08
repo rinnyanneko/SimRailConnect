@@ -105,7 +105,9 @@ internal sealed class PyscreenTelemetryCollector
                 return;
             }
 
-            DrainCommands(source);
+            if (DrainCommands(source))
+                return;
+
             TelemetryState.PublishSnapshot(CreateSnapshot(source, now));
             _consecutiveFailures = 0;
         }
@@ -291,7 +293,7 @@ internal sealed class PyscreenTelemetryCollector
         };
     }
 
-    private void DrainCommands(VehiclePyscreenDataSource source)
+    private bool DrainCommands(VehiclePyscreenDataSource source)
     {
         var processed = 0;
         while (processed < MaxCommandsPerTick && TelemetryCommandQueue.TryDequeue(out var command))
@@ -305,7 +307,7 @@ internal sealed class PyscreenTelemetryCollector
                 if (command.Kind == TelemetryCommandKind.InvalidateTelemetry)
                 {
                     Invalidate(command.Reason);
-                    return;
+                    return true;
                 }
 
                 if (command.Kind == TelemetryCommandKind.DriverControl)
@@ -318,6 +320,8 @@ internal sealed class PyscreenTelemetryCollector
                 Plugin.Logger.Warning($"Command {command.Id} failed: {ex.Message}");
             }
         }
+
+        return false;
     }
 
     private static void ApplyPyscreenWrite(VehiclePyscreenDataSource source, TelemetryCommand command)
@@ -448,6 +452,8 @@ internal sealed class PyscreenTelemetryCollector
                 break;
 
             case "setBattery":
+                WriteInput(controller, GeneralInputIndex.BatteryRequest, 0f);
+                WriteInput(controller, GeneralInputIndex.BatteryOffRequest, 0f);
                 WriteInput(controller, command.BoolValue ? GeneralInputIndex.BatteryRequest : GeneralInputIndex.BatteryOffRequest, 1f);
                 ApplyPyscreenWrite(source, ToPyscreenBool(command, "batt"));
                 break;
@@ -484,7 +490,21 @@ internal sealed class PyscreenTelemetryCollector
     private static void ApplyEmergencyBrake(VehicleControllerBase? controller, TrainsetInfo? trainset, bool active)
     {
         if (!active)
+        {
+            if (IsUsable(trainset))
+            {
+                trainset!.SetNoPowerAndBrake(false, false, false);
+                return;
+            }
+
+            if (IsUsable(controller))
+            {
+                controller!.SetNoPowerAndBrake(false, false);
+                return;
+            }
+
             return;
+        }
 
         if (IsUsable(trainset))
         {

@@ -445,8 +445,16 @@ public sealed class WebSocketApiServer
 
         var field = TryGetString(root, "field");
         int? index = null;
-        if (root.TryGetProperty("index", out var indexElement) && indexElement.TryGetInt32(out var parsedIndex))
-            index = parsedIndex >= 0 ? parsedIndex : null;
+        if (root.TryGetProperty("index", out var indexElement))
+        {
+            if (!indexElement.TryGetInt32(out var parsedIndex) || parsedIndex < 0)
+            {
+                error = "Command index must be a non-negative integer";
+                return false;
+            }
+
+            index = parsedIndex;
+        }
 
         if (string.IsNullOrWhiteSpace(field) && index == null)
         {
