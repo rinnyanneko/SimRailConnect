@@ -1,67 +1,68 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+
 # AGENTS.md
 
 Repository guidance for AI coding agents working on SimRailConnect.
 
 ## Project Overview
 
-SimRailConnect is a .NET 6 C# MelonLoader plugin experiment for SimRail. It is intended to expose telemetry through a local WebSocket API for external simulation, safety-system, display, and hardware-integration tooling.
+SimRailConnect is a .NET 6 C# MelonLoader mod for SimRail plugin developers. It exposes read-only SimRail telemetry through a local WebSocket API for external simulation, safety-system, display, and hardware-integration tooling.
 
-The current plugin build is managed-only and excludes HarmonyX, Unity, IL2CPP, native telemetry, and write-command prototype code. Unsafe native prototype paths were intentionally deleted; do not restore them for compatibility. The tested SimRail/MelonLoader IL2CPP runtime still crashes in MelonLoader's support module after loading an otherwise managed-only plugin, so do not auto-deploy or install this DLL into the game process.
+The current mod reads Pyscreen telemetry from `VehiclePyscreenDataSource` on the Unity main thread. It also supports queued write paths for SimRail common driver input slots, `SetNoPowerAndBrake`, and Pyscreen command groups. It does not use Harmony patches, IL2CPP class injection, direct `Marshal` reads, or background-thread Unity access.
 
 ## Repository Layout
 
 - `SimRail.sln` - Visual Studio solution.
 - `src/SimRailConnect/SimRailConnect.csproj` - .NET 6 project file and game-reference paths.
-- `src/SimRailConnect/Plugin.cs` - MelonLoader plugin entry point, preferences, and WebSocket startup.
-- `src/SimRailConnect/WebSocketApiServer.cs` - localhost WebSocket telemetry push, request/response, and command handling.
+- `src/SimRailConnect/Plugin.cs` - MelonLoader mod entry point, preferences, scene invalidation, and WebSocket startup.
+- `src/SimRailConnect/PyscreenTelemetryCollector.cs` - read-only main-thread telemetry collector.
+- `src/SimRailConnect/TelemetryCommandQueue.cs` - WebSocket-to-main-thread command queue.
+- `src/SimRailConnect/WebSocketApiServer.cs` - localhost WebSocket telemetry push and request/response handling.
 - `src/SimRailConnect/TelemetryState.cs` - shared state between Unity main thread and WebSocket background threads.
 - `src/SimRailConnect/Models.cs` - JSON response/request models.
-- `README.md` - user-facing overview, legal disclosure, install, configuration, and API summary.
+- `README.md` - user-facing overview, build, install, configuration, and API summary.
 - `WEBSOCKET_API.md` - detailed WebSocket message contract.
 
 ## Build and Test
 
-- Primary build command: `dotnet build SimRail.sln`.
-- The managed-only project requires the .NET 6 SDK and the local SimRail `MelonLoader/net6/MelonLoader.dll`. Generated `MelonLoader/Il2CppAssemblies` are useful for native prototype investigation, but must not be reintroduced into the managed-only build.
-- `GameDir` is currently set in `src/SimRailConnect/SimRailConnect.csproj`; do not assume it is valid on every machine.
-- Do not copy `SimRailConnect.dll` into `<GameDir>/Plugins` or `<GameDir>/Mods` until the MelonLoader IL2CPP support-module crash is resolved.
-- If build references fail, inspect `GameDir` and the generated `MelonLoader/Il2CppAssemblies` folder before changing code.
-- There is currently no dedicated automated test project. For behavioral changes, at minimum run `dotnet build SimRail.sln` when dependencies are available and document if it cannot be run.
+- Primary build command: `dotnet build SimRail.sln -p:GameDir="F:\SteamLibrary\steamapps\common\SimRail"`.
+- Real telemetry builds require the .NET 6 SDK, `$(GameDir)\MelonLoader\net6\MelonLoader.dll`, and generated wrappers under `$(GameDir)\MelonLoader\Il2CppAssemblies`.
+- `GameDir` is set in `src/SimRailConnect/SimRailConnect.csproj`; do not assume it is valid on every machine.
+- The assembly is a `MelonMod`; deploy it to `<GameDir>/Mods`, not `<GameDir>/Plugins`.
+- If build references fail, inspect `GameDir` and `MelonLoader/Il2CppAssemblies` before changing code.
+- There is currently no dedicated automated test project. For behavioral changes, at minimum run the primary build command and document any blocker.
 
 ## Architecture Constraints
 
-- Do not reintroduce `ClassInjector.RegisterTypeInIl2Cpp<T>()` or new IL2CPP class injection. The current design intentionally avoids ClassInjector because its global field-metadata hook caused scene-transition crashes.
-- `EnableTelemetryPatch` currently defaults to `false` and is ignored by the managed-only plugin build. The WebSocket server must not reference or call Harmony telemetry, Unity, IL2CPP wrappers, native pointers, or `Marshal`.
-- Do not use `FindObjectOfType` or broad Unity object scans on the hot telemetry path.
-- Do not cache IL2CPP/native references without a clear invalidation path for scene unloads and source replacement.
-- Preserve cache invalidation on scene lifecycle changes. Stale native wrappers can become dangling pointers and cause `AccessViolationException`.
-- If native telemetry is ever redesigned, prefer a separate optional assembly with a fresh safety review over restoring deleted in-tree prototype files.
+- Do not reintroduce `ClassInjector.RegisterTypeInIl2Cpp<T>()` or new IL2CPP class injection.
+- Do not add Harmony patches unless the user explicitly asks and the change gets a fresh safety review.
+- Do not access Unity, IL2CPP wrappers, native pointers, or game objects from `WebSocketApiServer`.
+- Keep telemetry collection on the Unity main thread, preferably in `MelonMod.OnUpdate`.
+- Keep write commands queued from WebSocket handlers and drained on the Unity main thread.
+- Keep driver-control write support limited to documented `Input_General`, `SetNoPowerAndBrake`, and Pyscreen command-array operations unless the user asks for a fresh train-specific controller integration.
+- Avoid `FindObjectOfType` or broad Unity scans on the hot telemetry path. Discovery scans must be throttled and cached.
+- Invalidate cached IL2CPP/native references on scene load/unload and after repeated read failures.
+- Avoid unsafe code, pointer arithmetic, direct array writes, and `Marshal` reads unless explicitly reviewed.
 
 ## Threading and Native Interop Rules
 
 - Native-memory and IL2CPP object access must happen on the Unity main thread.
-- WebSocket handlers run on background threads. They must not directly read or write IL2CPP/native game objects.
-- Writes from WebSocket `command` messages, cache invalidations, and debug/native inspection work should be queued and drained from the telemetry tick on the Unity main thread.
-- WebSocket handlers are network/background-thread code. They may read `TelemetryState.CurrentSnapshot` and enqueue validated commands only; they must not directly touch Unity, IL2CPP wrappers, native pointers, or `Marshal`.
-- When `EnableTelemetryPatch=false`, WebSocket `command`, `debug`, and `invalidate` must return `NATIVE_TELEMETRY_DISABLED` rather than queuing native work.
-- WebSocket `debug` messages must remain a queued diagnostic path. Do not read native array pointers directly from the WebSocket handler.
-- Keep shared WebSocket/telemetry state simple, immutable where practical, and safe for cross-thread reads.
-- Be conservative with unsafe code, pointer arithmetic, `Marshal`, and direct array writes. Add comments for non-obvious native layout assumptions.
+- WebSocket handlers run on background threads. They may read `TelemetryState.CurrentSnapshot` only.
+- WebSocket `command` and `invalidate` enqueue work only; they must not touch Unity or IL2CPP directly.
+- WebSocket `debug` returns `NATIVE_TELEMETRY_DISABLED` in this build.
+- Shared WebSocket/telemetry state should stay simple and safe for cross-thread reads.
 
 ## API and Documentation
 
-- When changing endpoint behavior, update `README.md`, `API_DOCUMENTATION.md`, and `WEBSOCKET_API.md` if user-facing contracts change.
+- When changing endpoint behavior, update `README.md` and `WEBSOCKET_API.md`.
 - Preserve JSON field names unless a breaking change is explicitly requested.
-- Keep write API behavior explicit: writes are queued, execute on the Unity main thread at the next telemetry tick, and may affect dashboard/display state rather than physical simulation state.
 - Keep WebSocket-only behavior explicit: the default WebSocket URL is `ws://localhost:5556/ws`.
-- Document WebSocket `debug` as diagnostics only. It exposes native cache shape and raw samples for troubleshooting, not a stable integration contract.
 
 ## Coding Style
 
 - Use C# with nullable reference types enabled.
-- Follow the existing file style: GPL header, explicit `using` directives, file-scoped namespace, and clear section comments for complex lifecycle/interoperability code.
-- Keep comments focused on why a native/threading/lifecycle decision is required; avoid restating straightforward code.
-- Do not introduce broad dependencies unless necessary for the plugin runtime. Remember the final artifact is loaded by MelonLoader inside the game process.
+- Follow the existing file style: GPL header, explicit `using` directives, file-scoped namespace, and clear comments for lifecycle/interoperability decisions.
+- Do not introduce broad dependencies unless necessary for the MelonLoader runtime.
 - Avoid changes that increase per-tick allocations or blocking work in the telemetry loop.
 
 ## Safety, Legal, and Scope
@@ -69,11 +70,11 @@ The current plugin build is managed-only and excludes HarmonyX, Unity, IL2CPP, n
 - This repository is for interoperability, simulation research, safety-system fidelity, custom displays, and hardware interfaces.
 - Do not add features intended for cheating, multiplayer advantage, DRM bypass, unauthorized content distribution, or interference with other players.
 - Preserve GPLv3 licensing notices in source files and derivative code.
-- Be careful with advice or changes that could modify multiplayer behavior; prefer read-only telemetry unless the requested change is clearly within the documented write API scope.
+- Prefer read-only telemetry unless the requested change is clearly within a reviewed write API scope.
 
 ## Agent Workflow
 
 - Before editing, inspect the relevant source and docs instead of guessing from names.
-- Keep changes narrow and explain any architectural tradeoff involving managed-only loading, future native telemetry split, Harmony patches, scene lifecycle, main-thread execution, or native memory.
-- If a command cannot run because local SimRail/MelonLoader dependencies are missing, report that exact blocker rather than masking it with unrelated changes.
+- Keep changes narrow and explain tradeoffs involving MelonLoader loading, IL2CPP wrappers, scene lifecycle, main-thread execution, or native memory.
+- If a command cannot run because local SimRail/MelonLoader dependencies are missing, report that exact blocker.
 - Do not revert user changes unless explicitly asked.

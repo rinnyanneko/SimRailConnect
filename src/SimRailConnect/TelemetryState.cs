@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /*
     SimRailConnect
     Copyright © 2026 rinnyanneko
@@ -22,20 +23,20 @@ namespace SimRailConnect;
 
 /// <summary>
 /// Thread-safe shared state for the telemetry pipeline.
-/// Plain static class in the managed-only plugin build; it is never registered
-/// with IL2CPP and has no Unity/Harmony dependency.
+/// This class is never registered with IL2CPP and has no Unity/Harmony
+/// dependency, so WebSocket background threads can safely read snapshots.
 /// </summary>
 public static class TelemetryState
 {
     /// <summary>
     /// Telemetry poll interval in milliseconds.
-    /// Written once by <see cref="Plugin"/> at startup. Native telemetry is not
-    /// included in the managed-only plugin build.
+    /// Written once by <see cref="Plugin"/> at startup and consumed by the
+    /// Unity-main-thread Pyscreen collector.
     /// </summary>
     public static int UpdateIntervalMs = 100;
 
     /// <summary>
-    /// Reserved for a future native telemetry assembly.
+    /// Reserved for telemetry providers that want to coordinate their next tick.
     /// </summary>
     public static float NextUpdate = 0f;
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /*
     SimRailConnect
     Copyright © 2026 rinnyanneko
@@ -26,10 +27,10 @@ using MelonLoader;
 
 namespace SimRailConnect;
 
-public class Plugin : MelonPlugin
+public class Plugin : MelonMod
 {
     public const string PluginName = "SimRailConnect";
-    public const string PluginVersion = "1.0.0";
+    public const string PluginVersion = "0.0.1";
 
     /// <summary>
     /// Per-plugin logger instance.  Assigned once in <see cref="OnInitializeMelon"/>
@@ -39,6 +40,9 @@ public class Plugin : MelonPlugin
     internal static MelonLogger.Instance Logger = null!;
 
     internal static WebSocketApiServer? WebSocketServer { get; private set; }
+#if SIMRAIL_IL2CPP
+    private readonly PyscreenTelemetryCollector _telemetryCollector = new();
+#endif
 
     public override void OnInitializeMelon()
     {
@@ -47,7 +51,10 @@ public class Plugin : MelonPlugin
 
         try
         {
-            var gameBasePath = AppContext.BaseDirectory.TrimEnd(
+            var gameBasePath = !string.IsNullOrWhiteSpace(MelonLoader.Utils.MelonEnvironment.GameRootDirectory)
+                ? MelonLoader.Utils.MelonEnvironment.GameRootDirectory
+                : AppContext.BaseDirectory;
+            gameBasePath = gameBasePath.TrimEnd(
                 Path.DirectorySeparatorChar,
                 Path.AltDirectorySeparatorChar);
             var melonLoaderPath = Path.Combine(gameBasePath, "MelonLoader");
@@ -81,16 +88,19 @@ public class Plugin : MelonPlugin
                 "WebSocketPayloadLimitBytes", 16384,
                 "Maximum inbound WebSocket JSON payload size in bytes");
 
-            var enableTelemetryPatch = category.CreateEntry(
-                "EnableTelemetryPatch", false,
-                "Reserved for a future native telemetry assembly. This managed plugin never patches IL2CPP.");
+            var enablePyscreenTelemetry = category.CreateEntry(
+                "EnablePyscreenTelemetry", true,
+                "Enable read-only SimRail Pyscreen telemetry collection on the Unity main thread.");
 
             var apiToken = category.CreateEntry(
                 "ApiToken", "",
                 "Optional token required by WebSocket clients; blank disables token auth");
 
             TelemetryState.UpdateIntervalMs = updateInterval.Value;
-            TelemetryState.PublishSnapshot(TelemetrySnapshot.CreateInactive("No telemetry provider has published data yet."));
+            TelemetryState.PublishSnapshot(TelemetrySnapshot.CreateInactive("Waiting for SimRail Pyscreen telemetry source."));
+#if SIMRAIL_IL2CPP
+            _telemetryCollector.IsEnabled = enablePyscreenTelemetry.Value;
+#endif
 
             WebSocketServer = new WebSocketApiServer(
                 webSocketPort.Value,
@@ -106,10 +116,11 @@ public class Plugin : MelonPlugin
             Logger.Msg($"Detected game path: {gameBasePath}");
             Logger.Msg($"Detected Il2CppAssemblies path: {il2CppAssembliesPath} (exists={Directory.Exists(il2CppAssembliesPath)})");
             Logger.Msg($"Telemetry update interval: {updateInterval.Value}ms");
-            Logger.Msg("WebSocket API is running. Telemetry stays inactive until a provider publishes snapshots.");
-
-            if (enableTelemetryPatch.Value)
-                Logger.Warning("EnableTelemetryPatch is reserved for provider builds and is ignored by this core plugin.");
+#if SIMRAIL_IL2CPP
+            Logger.Msg($"Pyscreen telemetry collector enabled: {_telemetryCollector.IsEnabled}");
+#else
+            Logger.Warning("Built without generated SimRail IL2CPP references; telemetry collector is unavailable.");
+#endif
 
             Logger.Msg($"{PluginName} loaded successfully!");
         }
@@ -126,8 +137,26 @@ public class Plugin : MelonPlugin
         TelemetryState.ClearSnapshot();
     }
 
-    // MelonPlugin intentionally avoids MelonMod scene callbacks and support
-    // components. On this SimRail/MelonLoader build, the IL2CPP support-module
-    // field-default hook can crash during WorldStreamerPlayer startup even when
-    // our telemetry Harmony patch is disabled.
+    public override void OnUpdate()
+    {
+#if SIMRAIL_IL2CPP
+        _telemetryCollector.Update();
+#endif
+    }
+
+    public override void OnSceneWasLoaded(int buildIndex, string sceneName)
+    {
+#if SIMRAIL_IL2CPP
+        _telemetryCollector.Invalidate($"scene loaded: {sceneName} ({buildIndex})");
+#endif
+        Logger.Msg($"Scene loaded: {sceneName} ({buildIndex})");
+    }
+
+    public override void OnSceneWasUnloaded(int buildIndex, string sceneName)
+    {
+#if SIMRAIL_IL2CPP
+        _telemetryCollector.Invalidate($"scene unloaded: {sceneName} ({buildIndex})");
+#endif
+        Logger.Msg($"Scene unloaded: {sceneName} ({buildIndex})");
+    }
 }

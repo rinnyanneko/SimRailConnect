@@ -1,51 +1,35 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+
 # SimRailConnect
 
-SimRailConnect is a managed-only .NET 6 MelonLoader plugin experiment for SimRail plugin developers. It exposes a local WebSocket API that other tools can consume while telemetry providers are developed separately.
+SimRailConnect is a .NET 6 MelonLoader mod for SimRail plugin developers. It reads SimRail Pyscreen telemetry on the Unity main thread and exposes snapshots through a local WebSocket API.
 
-The core build does not include Harmony, Unity, IL2CPP, native telemetry, native cache diagnostics, or write-command support. It starts the WebSocket API and publishes an inactive baseline snapshot until a provider writes telemetry through `TelemetryState.PublishSnapshot`.
+Default WebSocket URL: `ws://localhost:5556/ws`
 
-## Safety Scope
+## Scope
 
-This project is for interoperability, simulation research, safety-system fidelity, custom displays, and hardware interfaces.
+This project is for interoperability, simulation research, safety-system fidelity, custom displays, and hardware interfaces. Do not use it for cheating, multiplayer advantage, DRM bypass, unauthorized content distribution, or interfering with other players.
 
-Prohibited uses:
+## What Works
 
-- Cheating or gaining multiplayer advantage
-- DRM bypass or unauthorized content distribution
-- Interference with other players
+- Loads as a `MelonMod` from `<SimRail>\Mods\SimRailConnect.dll`
+- Starts the WebSocket API on localhost
+- Publishes read-only train telemetry from `VehiclePyscreenDataSource`
+- Queues limited Pyscreen command writes from WebSocket clients
+- Keeps Unity and IL2CPP object access on the Unity main thread
+- Lets WebSocket clients read `TelemetryState.CurrentSnapshot`
 
-## Current API Behavior
-
-Supported messages:
-
-- `ping`
-- `subscribe`
-- `unsubscribe`
-- `getSnapshot`
-
-Provider-dependent messages return `NATIVE_TELEMETRY_DISABLED` until a native/provider assembly implements them:
-
-- `command`
-- `debug`
-- `invalidate`
-
-See [WEBSOCKET_API.md](WEBSOCKET_API.md) for the intended WebSocket contract.
+Write commands are queued and applied on the Unity main thread. Named driver commands use SimRail's common `Input_General` slots and `SetNoPowerAndBrake` where available. Raw Pyscreen writes to `eimpcBool`, `eimpcInt`, and `eimpcFloat` remain available for plugin experiments. Native debug inspection remains disabled and returns `NATIVE_TELEMETRY_DISABLED`.
 
 ## Build
 
 Prerequisites:
 
 - .NET 6 SDK
-- For a real loadable plugin build: MelonLoader installed in SimRail and `$(GameDir)\MelonLoader\net6\MelonLoader.dll`
-- For API/client development only: no SimRail install is required; the project compiles with local MelonLoader stubs and emits a warning
+- SimRail with MelonLoader installed
+- Generated assemblies under `<SimRail>\MelonLoader\Il2CppAssemblies`
 
-Build for API/client development:
-
-```bash
-dotnet build SimRail.sln
-```
-
-Build a real MelonLoader plugin by overriding the game path:
+Build against the local game path:
 
 ```bash
 dotnet build SimRail.sln -p:GameDir="F:\SteamLibrary\steamapps\common\SimRail"
@@ -57,13 +41,7 @@ Release build:
 dotnet build SimRail.sln -c Release -p:GameDir="F:\SteamLibrary\steamapps\common\SimRail"
 ```
 
-The build does not copy `SimRailConnect.dll` into the game directory.
-
-## Install
-
-Build against the real MelonLoader assembly, then put `SimRailConnect.dll` into `<SimRail>\Plugins\`.
-
-The known SimRail/MelonLoader IL2CPP support-module crash is treated as an upstream/runtime issue for plugin development. This repository does not auto-deploy the DLL; install manually when testing the runtime.
+When `GameDir` points at a valid MelonLoader install, the build copies `SimRailConnect.dll` into `<GameDir>\Mods\`.
 
 ## Configure
 
@@ -71,13 +49,13 @@ Edit `<SimRail>\UserData\MelonPreferences.cfg` under `[SimRailConnect]`.
 
 | Key | Default | Description |
 | :--- | :--- | :--- |
-| `UpdateIntervalMs` | `100` | Reserved telemetry interval |
+| `UpdateIntervalMs` | `100` | Main-thread telemetry polling interval |
 | `WebSocketPort` | `5556` | WebSocket API server port |
 | `WebSocketMaxClients` | `3` | Maximum concurrent WebSocket clients |
 | `WebSocketDefaultRateHz` | `10` | Default push rate |
 | `WebSocketMaxRateHz` | `20` | Maximum per-client push rate |
 | `WebSocketPayloadLimitBytes` | `16384` | Maximum inbound JSON payload size |
-| `EnableTelemetryPatch` | `false` | Ignored by this managed-only build |
+| `EnablePyscreenTelemetry` | `true` | Enables the read-only Pyscreen telemetry collector |
 | `ApiToken` | empty | Optional token via `?token=...` or `Authorization: Bearer ...` |
 
 ## Logs
@@ -87,6 +65,12 @@ MelonLoader writes logs to:
 ```text
 <SimRail>\MelonLoader\Latest.log
 ```
+
+Useful SimRailConnect log lines include the detected game path, detected `Il2CppAssemblies` path, WebSocket URL, scene load/unload, telemetry cache invalidation, and Pyscreen source discovery.
+
+## API
+
+See [WEBSOCKET_API.md](WEBSOCKET_API.md).
 
 ## License
 

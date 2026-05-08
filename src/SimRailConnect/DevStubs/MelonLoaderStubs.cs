@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /*
     SimRailConnect
     Copyright © 2026 rinnyanneko
@@ -62,6 +63,21 @@ public abstract class MelonPlugin
     }
 }
 
+public abstract class MelonMod : MelonPlugin
+{
+    public virtual void OnUpdate()
+    {
+    }
+
+    public virtual void OnSceneWasLoaded(int buildIndex, string sceneName)
+    {
+    }
+
+    public virtual void OnSceneWasUnloaded(int buildIndex, string sceneName)
+    {
+    }
+}
+
 public static class MelonLogger
 {
     public sealed class Instance
@@ -78,6 +94,7 @@ public static class MelonPreferences
 {
     public static MelonPreferences_Category CreateCategory(string identifier) => new(identifier);
 }
+
 
 public sealed class MelonPreferences_Category
 {

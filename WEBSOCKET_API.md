@@ -1,25 +1,31 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+
 # SimRailConnect WebSocket API
 
-Intended URL: `ws://localhost:5556/ws`
+Default URL: `ws://localhost:5556/ws`
 
-This contract is retained for plugin development. The core plugin starts the API and publishes an inactive baseline snapshot until a telemetry provider publishes live data.
+The server publishes read-only telemetry snapshots collected from SimRail Pyscreen data on the Unity main thread. WebSocket handlers run on background threads and only read the latest snapshot.
 
-## Safe Mode
+Command messages are also handled safely: WebSocket handlers validate and queue them, then the Unity main thread applies them during the telemetry tick.
 
-This managed-only core build does not include native telemetry or write support.
-
-Supported messages:
+## Supported Messages
 
 - `ping`
 - `subscribe`
 - `unsubscribe`
 - `getSnapshot`
-
-Disabled native-dependent messages:
-
 - `command`
-- `debug`
 - `invalidate`
+
+## Request Ids
+
+Most client requests may include an optional string `id`. The server echoes this value in the response so clients can match responses to requests. SimRailConnect does not interpret `id` as a train id, game object id, command id, or session id.
+
+Using `id` is strongly recommended when sending multiple requests or commands quickly.
+
+Disabled messages:
+
+- `debug`
 
 Disabled messages return:
 
@@ -28,7 +34,7 @@ Disabled messages return:
   "type": "error",
   "id": "request-id",
   "code": "NATIVE_TELEMETRY_DISABLED",
-  "message": "Native telemetry is not included in this managed-only plugin build"
+  "message": "Native diagnostics are disabled in this build"
 }
 ```
 
@@ -144,11 +150,148 @@ Response:
   "id": "snap-001",
   "ok": true,
   "seq": 12346,
-  "timestampUnixMs": 1714300000100
+  "timestampUnixMs": 1714300000100,
+  "data": {
+    "isActive": true,
+    "status": "OK",
+    "train": {},
+    "brakes": {},
+    "electrical": {},
+    "safety": {},
+    "doors": {},
+    "controls": {},
+    "station": {},
+    "environment": {}
+  }
 }
 ```
 
-The core build returns an inactive `data` snapshot until a separate telemetry provider calls `TelemetryState.PublishSnapshot`.
+Before a train Pyscreen source exists, `data.isActive` is `false` and `data.status` describes what the collector is waiting for.
+
+## Command
+
+Commands are queued. An `ack` means the request passed validation and entered the queue; it does not mean SimRail has already consumed the value.
+
+Supported write targets:
+
+- `eimpcBool`
+- `eimpcInt`
+- `eimpcFloat`
+
+Supported named driver commands:
+
+- `emergencyBrake`
+- `noPowerAndBrake`
+- `setPower`
+- `setBrake`
+- `setLocalBrake`
+- `setThirdBrake`
+- `setEdBrake`
+- `setDirection`
+- `setSpeedTarget`
+- `securityAcknowledge`
+- `setSanding`
+- `horn`
+- `radioStop`
+- `etcsAck`
+- `setSpringBrake`
+- `setVcb`
+- `setBattery`
+- `setConverter`
+- `setCompressor`
+- `setFrontPantograph`
+- `setRearPantograph`
+
+Named driver command example:
+
+```json
+{
+  "type": "command",
+  "id": "cmd-power-001",
+  "command": "setPower",
+  "value": 0.35
+}
+```
+
+Emergency brake example:
+
+```json
+{
+  "type": "command",
+  "id": "cmd-eb-001",
+  "command": "emergencyBrake",
+  "value": true
+}
+```
+
+VCB/main switch example:
+
+```json
+{
+  "type": "command",
+  "id": "cmd-vcb-001",
+  "command": "setVcb",
+  "value": true
+}
+```
+
+Request using a field name:
+
+```json
+{
+  "type": "command",
+  "id": "cmd-001",
+  "target": "eimpcBool",
+  "field": "batt",
+  "value": true
+}
+```
+
+Request using a raw field index:
+
+```json
+{
+  "type": "command",
+  "id": "cmd-002",
+  "target": "eimpcFloat",
+  "index": 10,
+  "value": 1.0
+}
+```
+
+Queued response:
+
+```json
+{
+  "type": "ack",
+  "id": "cmd-001",
+  "ok": true,
+  "status": "queued",
+  "command": "eimpcBool",
+  "field": "batt",
+  "instance": 0,
+  "queuedCommands": 1
+}
+```
+
+Known fields:
+
+| Target | Fields |
+|---|---|
+| `eimpcBool` | `ms`, `heat`, `batt`, `conv`, `comp`, `comp_shutoff` |
+| `eimpcInt` | `motor_isactive` |
+| `eimpcFloat` | `fr`, `ihv`, `uhv`, `frt`, `frb`, `cv`, `ci`, `motor_fan_status`, `tcu_status`, `motor_temp`, `pantograph_front_status`, `pantograph_rear_status` |
+
+## Invalidate
+
+Invalidation is queued and applied on the Unity main thread.
+
+```json
+{
+  "type": "invalidate",
+  "id": "inv-001"
+}
+```
 
 ## Auth
 
