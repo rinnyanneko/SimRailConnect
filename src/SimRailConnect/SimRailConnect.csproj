@@ -27,7 +27,7 @@
 
     <AssemblyName>SimRailConnect</AssemblyName>
     <RootNamespace>SimRailConnect</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.0.1</Version>
     <Description>SimRail MelonLoader mod that exposes local WebSocket telemetry</Description>
 
     <!--
