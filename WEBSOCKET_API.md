@@ -274,6 +274,22 @@ Queued response:
 }
 ```
 
+If the command queue is full, the server rejects the request instead of enqueueing it. Clients should retry with backoff.
+
+```json
+{
+  "type": "error",
+  "id": "cmd-001",
+  "ok": false,
+  "error": "COMMAND_QUEUE_FULL",
+  "code": "COMMAND_QUEUE_FULL",
+  "message": "Command queue is full",
+  "currentQueueSize": 128
+}
+```
+
+The queue-size field is optional and may also be named `queuedCommands`.
+
 Known fields:
 
 | Target | Fields |
@@ -290,6 +306,20 @@ Invalidation is queued and applied on the Unity main thread.
 {
   "type": "invalidate",
   "id": "inv-001"
+}
+```
+
+Successful invalidation returns the same queued `ack` shape as commands. If the command queue is full, invalidation fails with `COMMAND_QUEUE_FULL`; clients should retry with backoff.
+
+```json
+{
+  "type": "error",
+  "id": "inv-001",
+  "ok": false,
+  "error": "COMMAND_QUEUE_FULL",
+  "code": "COMMAND_QUEUE_FULL",
+  "message": "Command queue is full",
+  "currentQueueSize": 128
 }
 ```
 

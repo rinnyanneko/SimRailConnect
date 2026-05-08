@@ -285,7 +285,7 @@ public sealed class WebSocketApiServer
 
         if (!TelemetryCommandQueue.TryEnqueue(command, out var error))
         {
-            await SendErrorAsync(client, id, "COMMAND_QUEUE_FULL", error).ConfigureAwait(false);
+            await SendCommandQueueFullAsync(client, id, error).ConfigureAwait(false);
             return;
         }
 
@@ -335,7 +335,7 @@ public sealed class WebSocketApiServer
 
         if (!TelemetryCommandQueue.TryEnqueue(command, out error))
         {
-            await SendErrorAsync(client, id, "COMMAND_QUEUE_FULL", error).ConfigureAwait(false);
+            await SendCommandQueueFullAsync(client, id, error).ConfigureAwait(false);
             return;
         }
 
@@ -381,10 +381,19 @@ public sealed class WebSocketApiServer
 
         var value = 0.0;
         var boolValue = false;
+        var requiresNumericValue = DriverCommandRequiresNumericValue(action);
         if (root.TryGetProperty("value", out var valueElement))
         {
             if (valueElement.ValueKind == JsonValueKind.True || valueElement.ValueKind == JsonValueKind.False)
+            {
+                if (requiresNumericValue)
+                {
+                    error = "Driver command value must be numeric";
+                    return false;
+                }
+
                 boolValue = valueElement.GetBoolean();
+            }
             else if (valueElement.TryGetDouble(out var parsedValue))
             {
                 value = parsedValue;
@@ -398,6 +407,12 @@ public sealed class WebSocketApiServer
         }
         else
         {
+            if (requiresNumericValue)
+            {
+                error = "Driver command requires numeric value";
+                return false;
+            }
+
             boolValue = true;
         }
 
@@ -431,7 +446,7 @@ public sealed class WebSocketApiServer
         var field = TryGetString(root, "field");
         int? index = null;
         if (root.TryGetProperty("index", out var indexElement) && indexElement.TryGetInt32(out var parsedIndex))
-            index = parsedIndex;
+            index = parsedIndex >= 0 ? parsedIndex : null;
 
         if (string.IsNullOrWhiteSpace(field) && index == null)
         {
@@ -525,6 +540,20 @@ public sealed class WebSocketApiServer
     private async Task SendErrorAsync(ClientConnection client, string? id, string code, string message)
     {
         await SendAsync(client, new { type = "error", id, code, message }).ConfigureAwait(false);
+    }
+
+    private async Task SendCommandQueueFullAsync(ClientConnection client, string? id, string message)
+    {
+        await SendAsync(client, new
+        {
+            type = "error",
+            id,
+            ok = false,
+            error = "COMMAND_QUEUE_FULL",
+            code = "COMMAND_QUEUE_FULL",
+            message,
+            currentQueueSize = TelemetryCommandQueue.Count
+        }).ConfigureAwait(false);
     }
 
     private async Task SendNativeTelemetryDisabledAsync(ClientConnection client, string? id)
@@ -677,6 +706,10 @@ public sealed class WebSocketApiServer
             _ => ""
         };
     }
+
+    private static bool DriverCommandRequiresNumericValue(string action) =>
+        action is "setPower" or "setBrake" or "setLocalBrake" or "setThirdBrake" or
+            "setEdBrake" or "setDirection" or "setSpeedTarget";
 
     private static string? TryGetString(JsonElement root, string name)
     {
