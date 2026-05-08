@@ -381,9 +381,22 @@ public sealed class WebSocketApiServer
 
         var value = 0.0;
         var boolValue = false;
-        if (root.TryGetProperty("value", out var valueElement))
+        var hasValue = root.TryGetProperty("value", out var valueElement);
+        var isBoolean = hasValue && (valueElement.ValueKind == JsonValueKind.True || valueElement.ValueKind == JsonValueKind.False);
+
+        // Analog-only commands require numeric values
+        if (action is "setPower" or "setBrake" or "setLocalBrake" or "setThirdBrake" or "setEdBrake" or "setDirection" or "setSpeedTarget")
         {
-            if (valueElement.ValueKind == JsonValueKind.True || valueElement.ValueKind == JsonValueKind.False)
+            if (!hasValue || isBoolean)
+            {
+                error = "INVALID_COMMAND";
+                return false;
+            }
+        }
+
+        if (hasValue)
+        {
+            if (isBoolean)
                 boolValue = valueElement.GetBoolean();
             else if (valueElement.TryGetDouble(out var parsedValue))
             {
@@ -430,7 +443,7 @@ public sealed class WebSocketApiServer
 
         var field = TryGetString(root, "field");
         int? index = null;
-        if (root.TryGetProperty("index", out var indexElement) && indexElement.TryGetInt32(out var parsedIndex))
+        if (root.TryGetProperty("index", out var indexElement) && indexElement.TryGetInt32(out var parsedIndex) && parsedIndex >= 0)
             index = parsedIndex;
 
         if (string.IsNullOrWhiteSpace(field) && index == null)

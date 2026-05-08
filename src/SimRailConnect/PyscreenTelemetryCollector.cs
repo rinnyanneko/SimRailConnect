@@ -400,7 +400,6 @@ internal sealed class PyscreenTelemetryCollector
 
             case "setEdBrake":
                 var edBrake = (int)Math.Round(command.NumberValue);
-                WriteInput(controller, GeneralInputIndex.ThirdBrake, Clamp01(command.NumberValue));
                 if (controller != null)
                     controller.EDBrakeState = edBrake;
                 break;
