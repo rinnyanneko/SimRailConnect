@@ -445,7 +445,8 @@ public sealed class WebSocketApiServer
         "status" => new
         {
             snapshot.IsActive,
-            snapshot.Timestamp
+            snapshot.Timestamp,
+            snapshot.Status
         },
         _ => null
     };

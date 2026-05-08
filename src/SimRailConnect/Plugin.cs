@@ -90,6 +90,7 @@ public class Plugin : MelonPlugin
                 "Optional token required by WebSocket clients; blank disables token auth");
 
             TelemetryState.UpdateIntervalMs = updateInterval.Value;
+            TelemetryState.PublishSnapshot(TelemetrySnapshot.CreateInactive("No telemetry provider has published data yet."));
 
             WebSocketServer = new WebSocketApiServer(
                 webSocketPort.Value,
@@ -105,11 +106,10 @@ public class Plugin : MelonPlugin
             Logger.Msg($"Detected game path: {gameBasePath}");
             Logger.Msg($"Detected Il2CppAssemblies path: {il2CppAssembliesPath} (exists={Directory.Exists(il2CppAssembliesPath)})");
             Logger.Msg($"Telemetry update interval: {updateInterval.Value}ms");
-            Logger.Msg("WebSocket commands disabled: native telemetry is not included in this build.");
+            Logger.Msg("WebSocket API is running. Telemetry stays inactive until a provider publishes snapshots.");
 
             if (enableTelemetryPatch.Value)
-                Logger.Warning("EnableTelemetryPatch is ignored by this managed-only plugin build.");
-            Logger.Warning("Native telemetry disabled: managed WebSocket plugin build has no IL2CPP/Harmony references.");
+                Logger.Warning("EnableTelemetryPatch is reserved for provider builds and is ignored by this core plugin.");
 
             Logger.Msg($"{PluginName} loaded successfully!");
         }
@@ -123,6 +123,7 @@ public class Plugin : MelonPlugin
     {
         Logger.Msg($"{PluginName} unloading...");
         WebSocketServer?.Stop();
+        TelemetryState.ClearSnapshot();
     }
 
     // MelonPlugin intentionally avoids MelonMod scene callbacks and support

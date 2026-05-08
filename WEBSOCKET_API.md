@@ -2,11 +2,11 @@
 
 Intended URL: `ws://localhost:5556/ws`
 
-This contract is retained for development, but the current MelonLoader plugin build is not safe to install into the tested SimRail IL2CPP runtime.
+This contract is retained for plugin development. The core plugin starts the API and publishes an inactive baseline snapshot until a telemetry provider publishes live data.
 
 ## Safe Mode
 
-This managed-only build does not include native telemetry or write support.
+This managed-only core build does not include native telemetry or write support.
 
 Supported messages:
 
@@ -148,7 +148,7 @@ Response:
 }
 ```
 
-In this managed-only build, `data` is omitted until a separate telemetry provider writes `TelemetryState.CurrentSnapshot`.
+The core build returns an inactive `data` snapshot until a separate telemetry provider calls `TelemetryState.PublishSnapshot`.
 
 ## Auth
 

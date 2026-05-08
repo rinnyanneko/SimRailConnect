@@ -26,6 +26,7 @@ public class TelemetrySnapshot
 {
     public DateTime Timestamp { get; set; } = DateTime.UtcNow;
     public bool IsActive { get; set; }
+    public string? Status { get; set; }
     public TrainInfo? Train { get; set; }
     public BrakeInfo? Brakes { get; set; }
     public ElectricalInfo? Electrical { get; set; }
@@ -34,6 +35,21 @@ public class TelemetrySnapshot
     public ControlInfo? Controls { get; set; }
     public StationInfo? Station { get; set; }
     public EnvironmentInfo? Environment { get; set; }
+
+    public static TelemetrySnapshot CreateInactive(string status) => new()
+    {
+        Timestamp = DateTime.UtcNow,
+        IsActive = false,
+        Status = status,
+        Train = new TrainInfo(),
+        Brakes = new BrakeInfo(),
+        Electrical = new ElectricalInfo(),
+        Safety = new SafetyInfo(),
+        Doors = new DoorInfo(),
+        Controls = new ControlInfo(),
+        Station = new StationInfo(),
+        Environment = new EnvironmentInfo()
+    };
 }
 
 /// <summary>

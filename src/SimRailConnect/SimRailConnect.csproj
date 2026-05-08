@@ -28,19 +28,35 @@
     <Version>0.1.0</Version>
     <Description>Managed-only MelonLoader plugin that exposes a local WebSocket API</Description>
 
-    <!-- SimRail game directory - adjust if your install path differs -->
-    <GameDir>F:\SteamLibrary\steamapps\common\SimRail</GameDir>
+    <!--
+      SimRail game directory - override this on developer machines.
+      Example:
+        dotnet build SimRail.sln -p:GameDir="F:\SteamLibrary\steamapps\common\SimRail"
+    -->
+    <GameDir Condition="'$(GameDir)' == ''">F:\SteamLibrary\steamapps\common\SimRail</GameDir>
+    <MelonLoaderPath Condition="'$(MelonLoaderPath)' == ''">$(GameDir)\MelonLoader\net6\MelonLoader.dll</MelonLoaderPath>
 
     <!-- Don't copy reference assemblies to output -->
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="Exists('$(MelonLoaderPath)')">
     <!-- MelonLoader core -->
     <Reference Include="MelonLoader" Private="false">
-      <HintPath>$(GameDir)\MelonLoader\net6\MelonLoader.dll</HintPath>
+      <HintPath>$(MelonLoaderPath)</HintPath>
     </Reference>
-
   </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="DevStubs\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="!Exists('$(MelonLoaderPath)')">
+    <Compile Include="DevStubs\MelonLoaderStubs.cs" />
+  </ItemGroup>
+
+  <Target Name="WarnWhenUsingMelonLoaderStubs" BeforeTargets="CoreCompile" Condition="!Exists('$(MelonLoaderPath)')">
+    <Warning Text="MelonLoader.dll was not found at '$(MelonLoaderPath)'. Building with compile-only development stubs; the output is not a loadable MelonLoader plugin until built against the real MelonLoader.dll." />
+  </Target>
 
 </Project>

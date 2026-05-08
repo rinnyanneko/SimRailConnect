@@ -16,6 +16,8 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+using System;
+
 namespace SimRailConnect;
 
 /// <summary>
@@ -23,7 +25,7 @@ namespace SimRailConnect;
 /// Plain static class in the managed-only plugin build; it is never registered
 /// with IL2CPP and has no Unity/Harmony dependency.
 /// </summary>
-internal static class TelemetryState
+public static class TelemetryState
 {
     /// <summary>
     /// Telemetry poll interval in milliseconds.
@@ -53,5 +55,16 @@ internal static class TelemetryState
     {
         get => _currentSnapshot;
         set => _currentSnapshot = value;
+    }
+
+    public static void PublishSnapshot(TelemetrySnapshot snapshot)
+    {
+        snapshot.Timestamp = DateTime.UtcNow;
+        CurrentSnapshot = snapshot;
+    }
+
+    public static void ClearSnapshot()
+    {
+        CurrentSnapshot = null;
     }
 }

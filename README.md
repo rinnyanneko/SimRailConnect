@@ -1,8 +1,8 @@
 # SimRailConnect
 
-SimRailConnect is a managed-only .NET 6 MelonLoader plugin experiment for SimRail. It is not currently safe to install into the game process with the tested SimRail/MelonLoader IL2CPP runtime.
+SimRailConnect is a managed-only .NET 6 MelonLoader plugin experiment for SimRail plugin developers. It exposes a local WebSocket API that other tools can consume while telemetry providers are developed separately.
 
-The current build does not include Harmony, Unity, IL2CPP, native telemetry, native cache diagnostics, or write-command support. The tested MelonLoader IL2CPP support module can still crash after loading an otherwise managed-only plugin, so builds are not auto-deployed to SimRail.
+The core build does not include Harmony, Unity, IL2CPP, native telemetry, native cache diagnostics, or write-command support. It starts the WebSocket API and publishes an inactive baseline snapshot until a provider writes telemetry through `TelemetryState.PublishSnapshot`.
 
 ## Safety Scope
 
@@ -23,7 +23,7 @@ Supported messages:
 - `unsubscribe`
 - `getSnapshot`
 
-Native-dependent messages return `NATIVE_TELEMETRY_DISABLED`:
+Provider-dependent messages return `NATIVE_TELEMETRY_DISABLED` until a native/provider assembly implements them:
 
 - `command`
 - `debug`
@@ -36,16 +36,16 @@ See [WEBSOCKET_API.md](WEBSOCKET_API.md) for the intended WebSocket contract.
 Prerequisites:
 
 - .NET 6 SDK
-- MelonLoader installed in SimRail
-- `$(GameDir)\MelonLoader\net6\MelonLoader.dll`
+- For a real loadable plugin build: MelonLoader installed in SimRail and `$(GameDir)\MelonLoader\net6\MelonLoader.dll`
+- For API/client development only: no SimRail install is required; the project compiles with local MelonLoader stubs and emits a warning
 
-Build with the default `GameDir` from the project file:
+Build for API/client development:
 
 ```bash
 dotnet build SimRail.sln
 ```
 
-Or override the game path:
+Build a real MelonLoader plugin by overriding the game path:
 
 ```bash
 dotnet build SimRail.sln -p:GameDir="F:\SteamLibrary\steamapps\common\SimRail"
@@ -61,7 +61,9 @@ The build does not copy `SimRailConnect.dll` into the game directory.
 
 ## Install
 
-Simpily put `SimRailConnect.dll` into `<SimRail>\Mods\`
+Build against the real MelonLoader assembly, then put `SimRailConnect.dll` into `<SimRail>\Plugins\`.
+
+The known SimRail/MelonLoader IL2CPP support-module crash is treated as an upstream/runtime issue for plugin development. This repository does not auto-deploy the DLL; install manually when testing the runtime.
 
 ## Configure
 
