@@ -16,7 +16,6 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 using System;
-using System.Collections.Generic;
 
 namespace SimRailConnect;
 
@@ -257,111 +256,4 @@ public class EnvironmentInfo
     public bool RadioVolumeMode { get; set; }
     /// <summary>Screen brightness.</summary>
     public int ScreenBrightness { get; set; }
-}
-
-/// <summary>
-/// Control command sent by external programs to modify game state.
-/// </summary>
-public class ControlCommand
-{
-    /// <summary>
-    /// Target subsystem: "generalFloat", "generalInt", "generalBool",
-    /// "eimppn", "brakes", "emu".
-    /// </summary>
-    public string Target { get; set; } = "";
-
-    /// <summary>
-    /// Field name within the target subsystem (e.g. "velocity", "mainctrl_pos").
-    /// </summary>
-    public string Field { get; set; } = "";
-
-    /// <summary>
-    /// Value to set (will be parsed to appropriate type).
-    /// </summary>
-    public object? Value { get; set; }
-}
-
-/// <summary>
-/// Validated write command queued by WebSocket network handlers and applied
-/// later by the Unity main thread.
-/// </summary>
-public class QueuedWriteCommand
-{
-    public string Id { get; set; } = "";
-    public string? ClientId { get; set; }
-    public string Target { get; set; } = "";
-    public string Field { get; set; } = "";
-    public string ValueKind { get; set; } = "";
-    public int Index { get; set; }
-    public double FloatValue { get; set; }
-    public int IntValue { get; set; }
-    public bool BoolValue { get; set; }
-    public DateTime QueuedAtUtc { get; set; } = DateTime.UtcNow;
-
-    public object Value => ValueKind switch
-    {
-        "float" => FloatValue,
-        "int" => IntValue,
-        "bool" => BoolValue,
-        _ => ""
-    };
-}
-
-/// <summary>
-/// Result produced by the Unity main thread after a queued write has been
-/// applied or rejected at apply time.
-/// </summary>
-public class CommandResult
-{
-    public string Type { get; set; } = "commandResult";
-    public string Id { get; set; } = "";
-    public string? ClientId { get; set; }
-    public bool Ok { get; set; }
-    public bool Queued { get; set; } = true;
-    public bool Applied { get; set; }
-    public string? Code { get; set; }
-    public string? Message { get; set; }
-    public string? Target { get; set; }
-    public string? Field { get; set; }
-    public object? Value { get; set; }
-    public long TimestampUnixMs { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-
-    public static CommandResult AppliedOk(QueuedWriteCommand command) => new()
-    {
-        Id = command.Id,
-        ClientId = command.ClientId,
-        Ok = true,
-        Applied = true,
-        Target = command.Target,
-        Field = command.Field,
-        Value = command.Value,
-        Message = "Command applied on Unity main thread"
-    };
-
-    public static CommandResult Fail(QueuedWriteCommand command, string code, string message) => new()
-    {
-        Id = command.Id,
-        ClientId = command.ClientId,
-        Ok = false,
-        Applied = false,
-        Code = code,
-        Message = message,
-        Target = command.Target,
-        Field = command.Field,
-        Value = command.Value
-    };
-}
-
-/// <summary>
-/// Response wrapper for API calls.
-/// </summary>
-public class ApiResponse<T>
-{
-    public bool Success { get; set; }
-    public T? Data { get; set; }
-    public string? Error { get; set; }
-    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
-
-    public static ApiResponse<T> Ok(T data) => new() { Success = true, Data = data };
-    public static ApiResponse<T> Fail(string error) => new() { Success = false, Error = error };
 }

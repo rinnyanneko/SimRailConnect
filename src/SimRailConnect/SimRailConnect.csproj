@@ -43,21 +43,4 @@
 
   </ItemGroup>
 
-  <ItemGroup>
-    <!-- Native telemetry is excluded from the managed-only plugin build.
-         Keeping these files out also keeps IL2CPP/Harmony references out of
-         assembly metadata, avoiding MelonLoader support-module injection. -->
-    <Compile Remove="GameBridge.cs" />
-    <Compile Remove="TelemetryMonitor.cs" />
-    <Compile Remove="ApiCommandRegistry.cs" />
-  </ItemGroup>
-
-  <!-- Convenience: copy plugin DLL to Plugins/ folder after a successful build -->
-  <Target Name="CopyToPlugins" AfterTargets="Build"
-          Condition="Exists('$(GameDir)\Plugins')">
-    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll"
-          DestinationFolder="$(GameDir)\Plugins\"
-          SkipUnchangedFiles="true" />
-    <Message Text="Copied $(AssemblyName).dll → $(GameDir)\Plugins\" Importance="high" />
-  </Target>
 </Project>

@@ -16,6 +16,8 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 using System;
+using System.IO;
+using System.Reflection;
 using MelonLoader;
 
 // MelonLoader plugin registration — must be at assembly scope (outside any namespace).
@@ -45,6 +47,13 @@ public class Plugin : MelonPlugin
 
         try
         {
+            var gameBasePath = AppContext.BaseDirectory.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar);
+            var melonLoaderPath = Path.Combine(gameBasePath, "MelonLoader");
+            var il2CppAssembliesPath = Path.Combine(melonLoaderPath, "Il2CppAssemblies");
+            var assemblyPath = Assembly.GetExecutingAssembly().Location;
+
             // ── Read config (UserData/MelonPreferences.cfg) ───────────────────
             var category = MelonPreferences.CreateCategory("SimRailConnect");
 
@@ -72,14 +81,6 @@ public class Plugin : MelonPlugin
                 "WebSocketPayloadLimitBytes", 16384,
                 "Maximum inbound WebSocket JSON payload size in bytes");
 
-            var webSocketCommandRateLimit = category.CreateEntry(
-                "WebSocketCommandRateLimitPerSecond", 5,
-                "Maximum WebSocket write commands per client per second");
-
-            var webSocketReadOnly = category.CreateEntry(
-                "WebSocketReadOnly", false,
-                "Disable WebSocket write commands while keeping telemetry push enabled");
-
             var enableTelemetryPatch = category.CreateEntry(
                 "EnableTelemetryPatch", false,
                 "Reserved for a future native telemetry assembly. This managed plugin never patches IL2CPP.");
@@ -100,8 +101,11 @@ public class Plugin : MelonPlugin
             WebSocketServer.Start();
 
             Logger.Msg($"WebSocket API server started on {WebSocketServer.Url}");
+            Logger.Msg($"Loaded assembly path: {assemblyPath}");
+            Logger.Msg($"Detected game path: {gameBasePath}");
+            Logger.Msg($"Detected Il2CppAssemblies path: {il2CppAssembliesPath} (exists={Directory.Exists(il2CppAssembliesPath)})");
             Logger.Msg($"Telemetry update interval: {updateInterval.Value}ms");
-            Logger.Msg($"WebSocket write mode: {(webSocketReadOnly.Value ? "READ-ONLY" : "READ/WRITE")}");
+            Logger.Msg("WebSocket commands disabled: native telemetry is not included in this build.");
 
             if (enableTelemetryPatch.Value)
                 Logger.Warning("EnableTelemetryPatch is ignored by this managed-only plugin build.");

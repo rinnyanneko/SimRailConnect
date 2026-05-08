@@ -477,9 +477,6 @@ public sealed class WebSocketApiServer
         private HashSet<string> _channels = new(StringComparer.OrdinalIgnoreCase);
         private int _rateHz;
         private DateTime _nextSendUtc = DateTime.UtcNow;
-        private DateTime _commandWindowUtc = DateTime.UtcNow;
-        private int _commandCount;
-
         public ClientConnection(WebSocket socket, int defaultRateHz, int maxRateHz)
         {
             Socket = socket;
@@ -515,25 +512,6 @@ public sealed class WebSocketApiServer
                 var now = DateTime.UtcNow;
                 if (now < _nextSendUtc) return false;
                 _nextSendUtc = now.AddMilliseconds(1000.0 / Math.Max(1, _rateHz));
-                return true;
-            }
-        }
-
-        public bool TryConsumeCommandSlot(int limitPerSecond)
-        {
-            lock (_gate)
-            {
-                var now = DateTime.UtcNow;
-                if ((now - _commandWindowUtc).TotalSeconds >= 1)
-                {
-                    _commandWindowUtc = now;
-                    _commandCount = 0;
-                }
-
-                if (_commandCount >= limitPerSecond)
-                    return false;
-
-                _commandCount++;
                 return true;
             }
         }

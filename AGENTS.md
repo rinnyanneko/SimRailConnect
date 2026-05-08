@@ -4,19 +4,16 @@ Repository guidance for AI coding agents working on SimRailConnect.
 
 ## Project Overview
 
-SimRailConnect is a .NET 6 C# MelonLoader plugin for SimRail. It exposes telemetry through a local WebSocket API for external simulation, safety-system, display, and hardware-integration tooling.
+SimRailConnect is a .NET 6 C# MelonLoader plugin experiment for SimRail. It is intended to expose telemetry through a local WebSocket API for external simulation, safety-system, display, and hardware-integration tooling.
 
-The current plugin build is managed-only and excludes HarmonyX, Unity, IL2CPP, and native telemetry files. Native telemetry prototypes remain in the repository but are not compiled until the SimRail/MelonLoader IL2CPP support-module crash is isolated.
+The current plugin build is managed-only and excludes HarmonyX, Unity, IL2CPP, native telemetry, and write-command prototype code. Unsafe native prototype paths were intentionally deleted; do not restore them for compatibility. The tested SimRail/MelonLoader IL2CPP runtime still crashes in MelonLoader's support module after loading an otherwise managed-only plugin, so do not auto-deploy or install this DLL into the game process.
 
 ## Repository Layout
 
 - `SimRail.sln` - Visual Studio solution.
 - `src/SimRailConnect/SimRailConnect.csproj` - .NET 6 project file and game-reference paths.
 - `src/SimRailConnect/Plugin.cs` - MelonLoader plugin entry point, preferences, and WebSocket startup.
-- `src/SimRailConnect/TelemetryMonitor.cs` - native telemetry prototype; excluded from the managed-only plugin build.
-- `src/SimRailConnect/GameBridge.cs` - native telemetry prototype; excluded from the managed-only plugin build.
 - `src/SimRailConnect/WebSocketApiServer.cs` - localhost WebSocket telemetry push, request/response, and command handling.
-- `src/SimRailConnect/ApiCommandRegistry.cs` - network-thread-safe write command validation and whitelist mapping.
 - `src/SimRailConnect/TelemetryState.cs` - shared state between Unity main thread and WebSocket background threads.
 - `src/SimRailConnect/Models.cs` - JSON response/request models.
 - `README.md` - user-facing overview, legal disclosure, install, configuration, and API summary.
@@ -25,19 +22,20 @@ The current plugin build is managed-only and excludes HarmonyX, Unity, IL2CPP, a
 ## Build and Test
 
 - Primary build command: `dotnet build SimRail.sln`.
-- The project requires .NET 6 SDK and local SimRail/MelonLoader IL2CPP assemblies.
+- The managed-only project requires the .NET 6 SDK and the local SimRail `MelonLoader/net6/MelonLoader.dll`. Generated `MelonLoader/Il2CppAssemblies` are useful for native prototype investigation, but must not be reintroduced into the managed-only build.
 - `GameDir` is currently set in `src/SimRailConnect/SimRailConnect.csproj`; do not assume it is valid on every machine.
+- Do not copy `SimRailConnect.dll` into `<GameDir>/Plugins` or `<GameDir>/Mods` until the MelonLoader IL2CPP support-module crash is resolved.
 - If build references fail, inspect `GameDir` and the generated `MelonLoader/Il2CppAssemblies` folder before changing code.
 - There is currently no dedicated automated test project. For behavioral changes, at minimum run `dotnet build SimRail.sln` when dependencies are available and document if it cannot be run.
 
 ## Architecture Constraints
 
 - Do not reintroduce `ClassInjector.RegisterTypeInIl2Cpp<T>()` or new IL2CPP class injection. The current design intentionally avoids ClassInjector because its global field-metadata hook caused scene-transition crashes.
-- `EnableTelemetryPatch` currently defaults to `false` and is ignored by the managed-only plugin build. The WebSocket server must not reference or call `GameBridge`, Harmony telemetry, Unity, IL2CPP wrappers, native pointers, or `Marshal`.
+- `EnableTelemetryPatch` currently defaults to `false` and is ignored by the managed-only plugin build. The WebSocket server must not reference or call Harmony telemetry, Unity, IL2CPP wrappers, native pointers, or `Marshal`.
 - Do not use `FindObjectOfType` or broad Unity object scans on the hot telemetry path.
 - Do not cache IL2CPP/native references without a clear invalidation path for scene unloads and source replacement.
 - Preserve cache invalidation on scene lifecycle changes. Stale native wrappers can become dangling pointers and cause `AccessViolationException`.
-- Prefer reading typed source-object arrays directly, as documented in `GameBridge.cs`, rather than relying on flat Pyscreen arrays that may only update while rendered.
+- If native telemetry is ever redesigned, prefer a separate optional assembly with a fresh safety review over restoring deleted in-tree prototype files.
 
 ## Threading and Native Interop Rules
 

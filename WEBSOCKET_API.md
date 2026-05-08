@@ -1,41 +1,73 @@
 # SimRailConnect WebSocket API
 
-Default URL: `ws://localhost:5556/ws`
+Intended URL: `ws://localhost:5556/ws`
 
-WebSocket is the only network API. The previous HTTP REST listener has been removed.
+This contract is retained for development, but the current MelonLoader plugin build is not safe to install into the tested SimRail IL2CPP runtime.
 
-## Native Telemetry Safe Mode
+## Safe Mode
 
-`EnableTelemetryPatch` defaults to `false` and is currently ignored by this managed-only plugin build. The WebSocket server does not reference `GameBridge`, Harmony telemetry, Unity, IL2CPP wrappers, native pointers, or `Marshal`.
+This managed-only build does not include native telemetry or write support.
 
-While safe mode is active:
+Supported messages:
 
-- `subscribe`, `unsubscribe`, `ping`, and `getSnapshot` still work.
-- `getSnapshot` returns the last managed snapshot, which is normally inactive/empty until native telemetry has been enabled.
-- `command`, `debug`, and `invalidate` return:
+- `ping`
+- `subscribe`
+- `unsubscribe`
+- `getSnapshot`
+
+Disabled native-dependent messages:
+
+- `command`
+- `debug`
+- `invalidate`
+
+Disabled messages return:
 
 ```json
 {
   "type": "error",
-  "id": "cmd-001",
+  "id": "request-id",
   "code": "NATIVE_TELEMETRY_DISABLED",
-  "message": "Native telemetry is disabled by EnableTelemetryPatch=false"
+  "message": "Native telemetry is not included in this managed-only plugin build"
 }
 ```
 
-Native telemetry will need to return as a separate optional assembly after the SimRail/MelonLoader IL2CPP support-module crash is isolated.
+## Hello
 
-## Threading Model
+After connection, the server sends:
 
-Read path:
-Unity main thread reads IL2CPP/native data in `GameBridge`, builds `TelemetryState.CurrentSnapshot`, and the WebSocket background sender serializes that managed snapshot to clients.
+```json
+{
+  "type": "hello",
+  "clientId": "client-id",
+  "url": "ws://localhost:5556/ws"
+}
+```
 
-Write path:
-WebSocket `command` messages are parsed and validated on a network thread, queued as managed commands, applied from the next `Pyscreen.Update()` telemetry tick on the Unity main thread, then returned as `commandResult`.
+## Ping
 
-WebSocket code must not touch Unity objects, IL2CPP wrappers, native pointers, or `Marshal`.
+Request:
+
+```json
+{
+  "type": "ping",
+  "id": "ping-001"
+}
+```
+
+Response:
+
+```json
+{
+  "type": "pong",
+  "id": "ping-001",
+  "timestampUnixMs": 1714300000000
+}
+```
 
 ## Subscribe
+
+Request:
 
 ```json
 {
@@ -46,7 +78,7 @@ WebSocket code must not touch Unity objects, IL2CPP wrappers, native pointers, o
 }
 ```
 
-Ack:
+Response:
 
 ```json
 {
@@ -56,7 +88,11 @@ Ack:
 }
 ```
 
-State push:
+Known channels:
+
+`train`, `brakes`, `electrical`, `power`, `safety`, `doors`, `controls`, `station`, `environment`, `lights`, `radio`, `signals`, `status`, `telemetry`, `full`.
+
+State push shape:
 
 ```json
 {
@@ -64,22 +100,34 @@ State push:
   "seq": 12345,
   "timestampUnixMs": 1714300000000,
   "channel": "train",
-  "data": {
-    "velocity": 87.4,
-    "velocityInt": 87,
-    "acceleration": 0.12,
-    "direction": 1
-  }
+  "data": {}
 }
 ```
 
-Channels:
+## Unsubscribe
 
-`train`, `brakes`, `electrical`, `power`, `safety`, `doors`, `controls`, `station`, `environment`, `lights`, `radio`, `signals`, `status`, `telemetry`, `full`.
+Request:
 
-`signals` currently carries available cab safety indicators. Current external signal/aspect is not exposed yet because it needs a separate safe main-thread cache design.
+```json
+{
+  "type": "unsubscribe",
+  "id": "unsub-001"
+}
+```
 
-## Snapshot Query
+Response:
+
+```json
+{
+  "type": "ack",
+  "id": "unsub-001",
+  "ok": true
+}
+```
+
+## Snapshot
+
+Request:
 
 ```json
 {
@@ -96,163 +144,20 @@ Response:
   "id": "snap-001",
   "ok": true,
   "seq": 12346,
-  "timestampUnixMs": 1714300000100,
-  "data": {}
+  "timestampUnixMs": 1714300000100
 }
 ```
 
-## Invalidate Cache
+In this managed-only build, `data` is omitted until a separate telemetry provider writes `TelemetryState.CurrentSnapshot`.
 
-Schedules cached native references to be dropped on the next Unity main-thread telemetry tick.
+## Auth
 
-```json
-{
-  "type": "invalidate",
-  "id": "inv-001"
-}
-```
+If `ApiToken` is configured, clients must provide either:
 
-Response:
+- `ws://localhost:5556/ws?token=<token>`
+- `Authorization: Bearer <token>`
 
-```json
-{
-  "type": "ack",
-  "id": "inv-001",
-  "ok": true,
-  "queued": true,
-  "message": "Cache invalidation scheduled for the next main-thread tick"
-}
-```
-
-## Debug Diagnostics
-
-Requests native cache diagnostics. The WebSocket handler only queues the request; `GameBridge` builds the debug snapshot on the Unity main thread.
-
-```json
-{
-  "type": "debug",
-  "id": "debug-001"
-}
-```
-
-Response:
-
-```json
-{
-  "type": "debug",
-  "id": "debug-001",
-  "ok": true,
-  "timestampUnixMs": 1714300000000,
-  "data": {
-    "dataSourceFound": true,
-    "dataFieldOffset": 40,
-    "arrayDataOffset": 32
-  }
-}
-```
-
-## Commands
-
-Action-style command:
-
-```json
-{
-  "type": "command",
-  "id": "cmd-001",
-  "target": "brakes",
-  "action": "set_brake",
-  "value": 4
-}
-```
-
-Compatibility field-style command:
-
-```json
-{
-  "type": "command",
-  "id": "cmd-002",
-  "target": "generalBool",
-  "field": "shp",
-  "value": true
-}
-```
-
-Queued ack:
-
-```json
-{
-  "type": "ack",
-  "id": "cmd-001",
-  "ok": true,
-  "queued": true
-}
-```
-
-Applied result:
-
-```json
-{
-  "type": "commandResult",
-  "id": "cmd-001",
-  "ok": true,
-  "queued": true,
-  "applied": true,
-  "target": "float",
-  "field": "pneumatic_brake_status",
-  "value": 4
-}
-```
-
-Error:
-
-```json
-{
-  "type": "error",
-  "id": "cmd-001",
-  "code": "VALUE_OUT_OF_RANGE",
-  "message": "Value must be between 0 and 10"
-}
-```
-
-Supported action commands:
-
-| Target | Action | Value |
-|---|---|---|
-| `train` | `set_throttle` | integer `-100..100` |
-| `train` | `set_reverser`, `set_direction` | integer `-1..1` |
-| `brakes` | `set_brake`, `set_train_brake` | number `0..10` |
-| `controls` | `set_speed_control` | number `0..250` |
-| `controls` | `set_speed_control_power` | number `0..1` |
-| `controls` | `set_speed_control_active`, `set_sanding` | boolean |
-| `safety` | `set_shp`, `set_ca`, `set_alarm` | boolean |
-| `lights` | `set_front`, `set_rear` | integer `0..10` |
-| `lights` | `set_compartments` | boolean |
-| `radio` | `set_channel` | integer `0..99` |
-| `radio` | `set_active` | boolean |
-| `radio` | `set_volume` | number `0..1` |
-
-Writes are conservative and whitelist-only. They write Pyscreen dashboard/display arrays, so they may affect visible cab/dashboard values rather than physical simulation state.
-
-## Ping/Pong
-
-```json
-{
-  "type": "ping",
-  "id": "ping-001"
-}
-```
-
-```json
-{
-  "type": "pong",
-  "id": "ping-001",
-  "timestampUnixMs": 1714300000000
-}
-```
-
-## Security and Limits
-
-Defaults:
+## Limits
 
 | Setting | Default |
 |---|---|
@@ -261,35 +166,4 @@ Defaults:
 | `WebSocketDefaultRateHz` | `10` |
 | `WebSocketMaxRateHz` | `20` |
 | `WebSocketPayloadLimitBytes` | `16384` |
-| `WebSocketCommandRateLimitPerSecond` | `5` |
-| `WebSocketReadOnly` | `false` |
-| `EnableTelemetryPatch` | `false` |
 | `ApiToken` | empty |
-
-The WebSocket listener binds to `localhost` only. If `ApiToken` is set, clients must pass either `?token=<token>` in the URL or `Authorization: Bearer <token>`.
-
-## Debug Examples
-
-Using `websocat`:
-
-```sh
-websocat ws://localhost:5556/ws
-```
-
-Using `wscat`:
-
-```sh
-wscat -c ws://localhost:5556/ws
-```
-
-Subscribe after connecting:
-
-```json
-{"type":"subscribe","id":"sub-001","channels":["train","brakes"],"rateHz":10}
-```
-
-Request a full snapshot:
-
-```json
-{"type":"getSnapshot","id":"snap-001"}
-```
