@@ -15,6 +15,7 @@ This project is for interoperability, simulation research, safety-system fidelit
 - Loads as a `MelonMod` from `<SimRail>\Mods\SimRailConnect.dll`
 - Starts the WebSocket API on localhost
 - Publishes read-only train telemetry from `VehiclePyscreenDataSource`
+- Publishes best-effort non-ETCS next-signal metadata from the current track scan, including distance, speed metadata, and inferred color when available
 - Queues limited Pyscreen command writes from WebSocket clients
 - Keeps Unity and IL2CPP object access on the Unity main thread
 - Lets WebSocket clients read `TelemetryState.CurrentSnapshot`

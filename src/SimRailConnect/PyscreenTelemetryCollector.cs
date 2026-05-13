@@ -20,6 +20,7 @@
 using System;
 using System.Collections.Generic;
 using Il2Cpp;
+using Il2CppAssets.Scripts.Signs;
 using Il2CppInterop.Runtime.InteropTypes;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using UnityEngine;
@@ -32,6 +33,9 @@ internal sealed class PyscreenTelemetryCollector
     private const long DiscoveryRetryMs = 1000;
     private const int MaxConsecutiveFailures = 5;
     private const int MaxCommandsPerTick = 16;
+    private const float SignalScanMaxDistanceMeters = 10000f;
+    private const long SignalScanMinIntervalMs = 500;
+    private const float SignalScanMinDistanceMeters = 25f;
 
     private static readonly Dictionary<string, int> EimpcBoolFields = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -82,6 +86,13 @@ internal sealed class PyscreenTelemetryCollector
     private double _lastVelocityKmh;
     private long _lastVelocityTick;
     private int _consecutiveFailures;
+    private NextSignalVisitor? _nextSignalVisitor;
+    private Track.ISuperAdvancedTrackVisitor? _nextSignalVisitorInterface;
+    private SignalAheadInfo _cachedSignalAhead = SignalUnavailable("signal scan has not run yet");
+    private long _lastSignalScanTime;
+    private IntPtr _lastSignalScanTrackPointer;
+    private float _lastSignalScanPosition;
+    private float _lastSignalScanDirection;
 
     public bool IsEnabled { get; set; }
 
@@ -135,6 +146,9 @@ internal sealed class PyscreenTelemetryCollector
         _nextDiscoveryAt = 0;
         _lastVelocityTick = 0;
         _consecutiveFailures = 0;
+        _cachedSignalAhead = SignalUnavailable("signal cache invalidated");
+        _lastSignalScanTime = 0;
+        _lastSignalScanTrackPointer = IntPtr.Zero;
         Plugin.Logger.Msg($"Telemetry cache invalidated: {reason}");
     }
 
@@ -292,9 +306,170 @@ internal sealed class PyscreenTelemetryCollector
                 RadioNightMode = Read(generalBool, BoolIndex.RadioNightMode),
                 RadioVolumeMode = Read(generalBool, BoolIndex.RadioVolumeMode),
                 ScreenBrightness = Read(generalInt, IntIndex.ScreenBrightness)
-            }
+            },
+            Signals = ReadSignalAhead(_trainset, now)
         };
     }
+
+    private SignalAheadInfo ReadSignalAhead(TrainsetInfo? trainset, long now)
+    {
+        if (!IsUsable(trainset))
+            return SignalUnavailable("trainset unavailable");
+
+        var axle = trainset!.FirstAxleInDrivingDirection;
+        if (!IsUsable(axle))
+            axle = trainset.AxleToVisitor;
+
+        if (!IsUsable(axle))
+            return SignalUnavailable("driving-direction axle unavailable");
+
+        var track = axle!.CurrentTrack;
+        if (!IsUsable(track))
+            return SignalUnavailable("current track unavailable");
+
+        var startDistance = 0f;
+        var direction = axle.Dir;
+        var trackFollower = axle.TryCast<TrackFollower>();
+        if (IsUsable(trackFollower))
+        {
+            startDistance = trackFollower!.dist;
+            direction = trackFollower.dir;
+        }
+
+        if (!ShouldScanSignal(track!, startDistance, direction, now))
+            return _cachedSignalAhead;
+
+        var visitor = GetNextSignalVisitor();
+        visitor.signal = null;
+        visitor.distance = 0f;
+
+        track!.Scan(
+            direction,
+            SignalScanMaxDistanceMeters,
+            new Il2CppSystem.Nullable<float>(startDistance),
+            _nextSignalVisitorInterface!);
+
+        _lastSignalScanTime = now;
+        _lastSignalScanTrackPointer = track.Pointer;
+        _lastSignalScanPosition = startDistance;
+        _lastSignalScanDirection = direction;
+
+        var signal = visitor.signal;
+        if (!IsUsable(signal))
+        {
+            _cachedSignalAhead = SignalUnavailable("no signal found ahead");
+            return _cachedSignalAhead;
+        }
+
+        var speedLimit = ResolveSpeedLimit(signal!.firstLocalMaxSpeed, signal.firstGlobalMaxSpeed);
+        var nextSpeedLimit = ResolveSpeedLimit(signal.secondLocalMaxSpeed, signal.secondGlobalMaxSpeed);
+        var color = InferSignalColor(speedLimit, nextSpeedLimit, out var colorSource);
+
+        _cachedSignalAhead = new SignalAheadInfo
+        {
+            HasSignal = true,
+            Source = "track-next-signal-visitor",
+            Name = NullIfEmpty(signal.realObjectName),
+            ObjectIdentifier = NullIfEmpty(signal.objectIdentifier),
+            TrackId = NullIfEmpty(signal.trackID),
+            SignalType = signal.signalType.ToString(),
+            DistanceMeters = visitor.distance,
+            SpeedLimitKmh = speedLimit,
+            NextSpeedLimitKmh = nextSpeedLimit,
+            FirstLocalSpeedKmh = signal.firstLocalMaxSpeed,
+            SecondLocalSpeedKmh = signal.secondLocalMaxSpeed,
+            FirstGlobalSpeedKmh = signal.firstGlobalMaxSpeed,
+            SecondGlobalSpeedKmh = signal.secondGlobalMaxSpeed,
+            Color = color,
+            ColorSource = colorSource,
+            LightKinds = ReadSignalLightKinds(signal.lights),
+            Note = color == null
+                ? "Live lamp color is not exposed by this non-ETCS track metadata path."
+                : "Color is inferred from non-ETCS speed metadata, not live lamp state."
+        };
+        return _cachedSignalAhead;
+    }
+
+    private bool ShouldScanSignal(Track track, float startDistance, float direction, long now)
+    {
+        if (_lastSignalScanTime == 0 || _lastSignalScanTrackPointer != track.Pointer)
+            return true;
+
+        if (Math.Abs(direction - _lastSignalScanDirection) > float.Epsilon)
+            return true;
+
+        if (Math.Abs(startDistance - _lastSignalScanPosition) >= SignalScanMinDistanceMeters)
+            return true;
+
+        return now - _lastSignalScanTime >= SignalScanMinIntervalMs;
+    }
+
+    private NextSignalVisitor GetNextSignalVisitor()
+    {
+        if (!IsUsable(_nextSignalVisitor))
+        {
+            _nextSignalVisitor = new NextSignalVisitor();
+            _nextSignalVisitorInterface = new Track.ISuperAdvancedTrackVisitor(_nextSignalVisitor.Pointer);
+        }
+
+        return _nextSignalVisitor!;
+    }
+
+    private static SignalAheadInfo SignalUnavailable(string note) => new()
+    {
+        HasSignal = false,
+        Source = "track-next-signal-visitor",
+        ColorSource = "unavailable",
+        Note = note
+    };
+
+    private static int? ResolveSpeedLimit(int localSpeed, int globalSpeed)
+    {
+        var local = localSpeed >= 0 ? localSpeed : (int?)null;
+        var global = globalSpeed >= 0 ? globalSpeed : (int?)null;
+
+        return (local, global) switch
+        {
+            ({ } l, { } g) => Math.Min(l, g),
+            ({ } l, null) => l,
+            (null, { } g) => g,
+            _ => null
+        };
+    }
+
+    private static string? InferSignalColor(int? speedLimit, int? nextSpeedLimit, out string colorSource)
+    {
+        colorSource = "speed-limit-inference";
+
+        if (speedLimit == 0)
+            return "red";
+
+        if (speedLimit == null)
+        {
+            colorSource = "unavailable";
+            return null;
+        }
+
+        if (nextSpeedLimit.HasValue && nextSpeedLimit.Value > 0 && nextSpeedLimit.Value < speedLimit.Value)
+            return "yellow";
+
+        return "green";
+    }
+
+    private static string[]? ReadSignalLightKinds(Il2CppStructArray<SignalLight.SignalLightKind>? lights)
+    {
+        if (lights == null || lights.Length == 0)
+            return null;
+
+        var result = new string[lights.Length];
+        for (var i = 0; i < lights.Length; i++)
+            result[i] = lights[i].ToString();
+
+        return result;
+    }
+
+    private static string? NullIfEmpty(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value;
 
     private void DrainWithoutSource()
     {

@@ -36,6 +36,7 @@ public class TelemetrySnapshot
     public ControlInfo? Controls { get; set; }
     public StationInfo? Station { get; set; }
     public EnvironmentInfo? Environment { get; set; }
+    public SignalAheadInfo? Signals { get; set; }
 
     public static TelemetrySnapshot CreateInactive(string status) => new()
     {
@@ -49,7 +50,8 @@ public class TelemetrySnapshot
         Doors = new DoorInfo(),
         Controls = new ControlInfo(),
         Station = new StationInfo(),
-        Environment = new EnvironmentInfo()
+        Environment = new EnvironmentInfo(),
+        Signals = new SignalAheadInfo()
     };
 }
 
@@ -273,4 +275,45 @@ public class EnvironmentInfo
     public bool RadioVolumeMode { get; set; }
     /// <summary>Screen brightness.</summary>
     public int ScreenBrightness { get; set; }
+}
+
+/// <summary>
+/// Next track-side signal ahead of the train, from non-ETCS track metadata.
+/// </summary>
+public class SignalAheadInfo
+{
+    /// <summary>True when a signal was found ahead of the driving-direction axle.</summary>
+    public bool HasSignal { get; set; }
+    /// <summary>Data source used for this signal read.</summary>
+    public string? Source { get; set; }
+    /// <summary>Signal object name from SimRail track metadata.</summary>
+    public string? Name { get; set; }
+    /// <summary>Stable-ish object identifier, when available.</summary>
+    public string? ObjectIdentifier { get; set; }
+    /// <summary>Track identifier containing the signal.</summary>
+    public string? TrackId { get; set; }
+    /// <summary>Signal type reported by the track object.</summary>
+    public string? SignalType { get; set; }
+    /// <summary>Distance from the driving-direction axle to the signal, in metres.</summary>
+    public double? DistanceMeters { get; set; }
+    /// <summary>Best-effort current speed limit at this signal, in km/h.</summary>
+    public int? SpeedLimitKmh { get; set; }
+    /// <summary>Best-effort next-block speed limit, in km/h.</summary>
+    public int? NextSpeedLimitKmh { get; set; }
+    /// <summary>Raw first local speed value from the signal metadata.</summary>
+    public int FirstLocalSpeedKmh { get; set; }
+    /// <summary>Raw second local speed value from the signal metadata.</summary>
+    public int SecondLocalSpeedKmh { get; set; }
+    /// <summary>Raw first global speed value from the signal metadata.</summary>
+    public int FirstGlobalSpeedKmh { get; set; }
+    /// <summary>Raw second global speed value from the signal metadata.</summary>
+    public int SecondGlobalSpeedKmh { get; set; }
+    /// <summary>Best-effort signal color, when it can be inferred.</summary>
+    public string? Color { get; set; }
+    /// <summary>How the color value was produced.</summary>
+    public string? ColorSource { get; set; }
+    /// <summary>Physical light kinds configured on the signal, not live lamp states.</summary>
+    public string[]? LightKinds { get; set; }
+    /// <summary>Reason signal data is unavailable or partially inferred.</summary>
+    public string? Note { get; set; }
 }
