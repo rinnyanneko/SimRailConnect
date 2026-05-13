@@ -162,12 +162,46 @@ Response:
     "doors": {},
     "controls": {},
     "station": {},
-    "environment": {}
+    "environment": {},
+    "signals": {}
   }
 }
 ```
 
 Before a train Pyscreen source exists, `data.isActive` is `false` and `data.status` describes what the collector is waiting for.
+
+## Signals Channel
+
+The `signals` channel combines existing safety booleans with best-effort non-ETCS track metadata for the next signal ahead of the driving-direction axle. It uses SimRail track scanning on the Unity main thread and does not read ETCS telemetry.
+
+Example `signals` payload:
+
+```json
+{
+  "hasSignal": true,
+  "source": "track-next-signal-visitor",
+  "name": "A_123",
+  "objectIdentifier": "signal-identifier",
+  "trackId": "track-id",
+  "signalType": "MainSignal",
+  "distanceMeters": 742.5,
+  "speedLimitKmh": 60,
+  "nextSpeedLimitKmh": 40,
+  "firstLocalSpeedKmh": 60,
+  "secondLocalSpeedKmh": 40,
+  "firstGlobalSpeedKmh": 0,
+  "secondGlobalSpeedKmh": 0,
+  "color": "yellow",
+  "colorSource": "speed-limit-inference",
+  "lightKinds": ["Red", "Orange", "Green"],
+  "note": "Color is inferred from non-ETCS speed metadata, not live lamp state.",
+  "shp": false,
+  "ca": false,
+  "alarmActive": false
+}
+```
+
+`distanceMeters`, `speedLimitKmh`, and `nextSpeedLimitKmh` may be `null` when the current track or signal metadata is unavailable. `color` is only a conservative inference from speed metadata; `lightKinds` describes configured physical light types, not live illuminated lamps.
 
 ## Command
 

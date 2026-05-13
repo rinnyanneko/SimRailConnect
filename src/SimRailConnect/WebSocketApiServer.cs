@@ -652,11 +652,26 @@ public sealed class WebSocketApiServer
         },
         "signals" => new
         {
-            source = "pyscreen-safety",
+            snapshot.Signals?.HasSignal,
+            snapshot.Signals?.Source,
+            snapshot.Signals?.Name,
+            snapshot.Signals?.ObjectIdentifier,
+            snapshot.Signals?.TrackId,
+            snapshot.Signals?.SignalType,
+            snapshot.Signals?.DistanceMeters,
+            snapshot.Signals?.SpeedLimitKmh,
+            snapshot.Signals?.NextSpeedLimitKmh,
+            snapshot.Signals?.FirstLocalSpeedKmh,
+            snapshot.Signals?.SecondLocalSpeedKmh,
+            snapshot.Signals?.FirstGlobalSpeedKmh,
+            snapshot.Signals?.SecondGlobalSpeedKmh,
+            snapshot.Signals?.Color,
+            snapshot.Signals?.ColorSource,
+            snapshot.Signals?.LightKinds,
+            snapshot.Signals?.Note,
             snapshot.Safety?.SHP,
             snapshot.Safety?.CA,
-            snapshot.Safety?.AlarmActive,
-            note = "Current signal/aspect is not exposed yet; this channel currently carries available cab safety indicators."
+            snapshot.Safety?.AlarmActive
         },
         "status" => new
         {
