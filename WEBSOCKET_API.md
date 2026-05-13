@@ -201,7 +201,7 @@ Example `signals` payload:
 }
 ```
 
-`distanceMeters`, `speedLimitKmh`, and `nextSpeedLimitKmh` may be `null` when the current track or signal metadata is unavailable. `color` is only a conservative inference from speed metadata; `lightKinds` describes configured physical light types, not live illuminated lamps.
+`distanceMeters`, `speedLimitKmh`, and `nextSpeedLimitKmh` may be omitted (or null depending on serialization) when the current track or signal metadata is unavailable. `color` is a conservative inference from speed metadata; `lightKinds` describes configured physical light types, not live illuminated lamps.
 
 ## Command
 

@@ -34,6 +34,8 @@ internal sealed class PyscreenTelemetryCollector
     private const int MaxConsecutiveFailures = 5;
     private const int MaxCommandsPerTick = 16;
     private const float SignalScanMaxDistanceMeters = 10000f;
+    private const long SignalScanMinIntervalMs = 500;
+    private const float SignalScanMinDistanceMeters = 25f;
 
     private static readonly Dictionary<string, int> EimpcBoolFields = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -84,6 +86,13 @@ internal sealed class PyscreenTelemetryCollector
     private double _lastVelocityKmh;
     private long _lastVelocityTick;
     private int _consecutiveFailures;
+    private NextSignalVisitor? _nextSignalVisitor;
+    private Track.ISuperAdvancedTrackVisitor? _nextSignalVisitorInterface;
+    private SignalAheadInfo _cachedSignalAhead = SignalUnavailable("signal scan has not run yet");
+    private long _lastSignalScanTime;
+    private IntPtr _lastSignalScanTrackPointer;
+    private float _lastSignalScanPosition;
+    private float _lastSignalScanDirection;
 
     public bool IsEnabled { get; set; }
 
@@ -137,6 +146,9 @@ internal sealed class PyscreenTelemetryCollector
         _nextDiscoveryAt = 0;
         _lastVelocityTick = 0;
         _consecutiveFailures = 0;
+        _cachedSignalAhead = SignalUnavailable("signal cache invalidated");
+        _lastSignalScanTime = 0;
+        _lastSignalScanTrackPointer = IntPtr.Zero;
         Plugin.Logger.Msg($"Telemetry cache invalidated: {reason}");
     }
 
@@ -295,11 +307,11 @@ internal sealed class PyscreenTelemetryCollector
                 RadioVolumeMode = Read(generalBool, BoolIndex.RadioVolumeMode),
                 ScreenBrightness = Read(generalInt, IntIndex.ScreenBrightness)
             },
-            Signals = ReadSignalAhead(_trainset)
+            Signals = ReadSignalAhead(_trainset, now)
         };
     }
 
-    private static SignalAheadInfo ReadSignalAhead(TrainsetInfo? trainset)
+    private SignalAheadInfo ReadSignalAhead(TrainsetInfo? trainset, long now)
     {
         if (!IsUsable(trainset))
             return SignalUnavailable("trainset unavailable");
@@ -324,23 +336,36 @@ internal sealed class PyscreenTelemetryCollector
             direction = trackFollower.dir;
         }
 
-        var visitor = new NextSignalVisitor();
-        var visitorInterface = new Track.ISuperAdvancedTrackVisitor(visitor.Pointer);
+        if (!ShouldScanSignal(track!, startDistance, direction, now))
+            return _cachedSignalAhead;
+
+        var visitor = GetNextSignalVisitor();
+        visitor.signal = null;
+        visitor.distance = 0f;
+
         track!.Scan(
             direction,
             SignalScanMaxDistanceMeters,
             new Il2CppSystem.Nullable<float>(startDistance),
-            visitorInterface);
+            _nextSignalVisitorInterface!);
+
+        _lastSignalScanTime = now;
+        _lastSignalScanTrackPointer = track.Pointer;
+        _lastSignalScanPosition = startDistance;
+        _lastSignalScanDirection = direction;
 
         var signal = visitor.signal;
         if (!IsUsable(signal))
-            return SignalUnavailable("no signal found ahead");
+        {
+            _cachedSignalAhead = SignalUnavailable("no signal found ahead");
+            return _cachedSignalAhead;
+        }
 
         var speedLimit = ResolveSpeedLimit(signal!.firstLocalMaxSpeed, signal.firstGlobalMaxSpeed);
         var nextSpeedLimit = ResolveSpeedLimit(signal.secondLocalMaxSpeed, signal.secondGlobalMaxSpeed);
         var color = InferSignalColor(speedLimit, nextSpeedLimit, out var colorSource);
 
-        return new SignalAheadInfo
+        _cachedSignalAhead = new SignalAheadInfo
         {
             HasSignal = true,
             Source = "track-next-signal-visitor",
@@ -362,6 +387,32 @@ internal sealed class PyscreenTelemetryCollector
                 ? "Live lamp color is not exposed by this non-ETCS track metadata path."
                 : "Color is inferred from non-ETCS speed metadata, not live lamp state."
         };
+        return _cachedSignalAhead;
+    }
+
+    private bool ShouldScanSignal(Track track, float startDistance, float direction, long now)
+    {
+        if (_lastSignalScanTime == 0 || _lastSignalScanTrackPointer != track.Pointer)
+            return true;
+
+        if (Math.Abs(direction - _lastSignalScanDirection) > float.Epsilon)
+            return true;
+
+        if (Math.Abs(startDistance - _lastSignalScanPosition) >= SignalScanMinDistanceMeters)
+            return true;
+
+        return now - _lastSignalScanTime >= SignalScanMinIntervalMs;
+    }
+
+    private NextSignalVisitor GetNextSignalVisitor()
+    {
+        if (!IsUsable(_nextSignalVisitor))
+        {
+            _nextSignalVisitor = new NextSignalVisitor();
+            _nextSignalVisitorInterface = new Track.ISuperAdvancedTrackVisitor(_nextSignalVisitor.Pointer);
+        }
+
+        return _nextSignalVisitor!;
     }
 
     private static SignalAheadInfo SignalUnavailable(string note) => new()
@@ -374,8 +425,8 @@ internal sealed class PyscreenTelemetryCollector
 
     private static int? ResolveSpeedLimit(int localSpeed, int globalSpeed)
     {
-        var local = localSpeed > 0 ? localSpeed : (int?)null;
-        var global = globalSpeed > 0 ? globalSpeed : (int?)null;
+        var local = localSpeed >= 0 ? localSpeed : (int?)null;
+        var global = globalSpeed >= 0 ? globalSpeed : (int?)null;
 
         return (local, global) switch
         {
