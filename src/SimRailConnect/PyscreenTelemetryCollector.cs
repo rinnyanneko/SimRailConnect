@@ -19,8 +19,7 @@
 #if SIMRAIL_IL2CPP
 using System;
 using System.Collections.Generic;
-using Il2Cpp;
-using Il2CppAssets.Scripts.Signs;
+using Assets.Scripts.Signs;
 using Il2CppInterop.Runtime.InteropTypes;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using UnityEngine;
