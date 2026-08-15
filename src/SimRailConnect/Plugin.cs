@@ -37,7 +37,10 @@ public class Plugin : MelonMod
     /// so that <c>WebSocketApiServer</c> can write structured log entries
     /// without importing MelonLoader directly.
     /// </summary>
-    internal static MelonLogger.Instance Logger = null!;
+    private static MelonLogger.Instance? _logger;
+
+    internal static MelonLogger.Instance Logger =>
+        _logger ?? throw new InvalidOperationException("SimRailConnect logger is not initialized.");
 
     internal static WebSocketApiServer? WebSocketServer { get; private set; }
 #if SIMRAIL_IL2CPP
@@ -46,7 +49,7 @@ public class Plugin : MelonMod
 
     public override void OnInitializeMelon()
     {
-        Logger = base.LoggerInstance;
+        _logger = base.LoggerInstance;
         Logger.Msg($"{PluginName} v{PluginVersion} loading...");
 
         try

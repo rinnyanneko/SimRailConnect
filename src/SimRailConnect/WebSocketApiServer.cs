@@ -105,7 +105,7 @@ public sealed class WebSocketApiServer
             catch (HttpListenerException ex)
             {
                 lastError = ex;
-                try { candidate.Close(); } catch { }
+                candidate.Close();
             }
         }
 
@@ -115,18 +115,18 @@ public sealed class WebSocketApiServer
         if (_activePort != _requestedPort)
             Plugin.Logger.Warning($"WebSocket port {_requestedPort} is unavailable; using {_activePort} instead.");
 
-        _cts = new CancellationTokenSource();
-        _acceptTask = Task.Run(() => AcceptLoopAsync(_cts.Token));
-        _broadcastTask = Task.Run(() => BroadcastLoopAsync(_cts.Token));
+        var cts = new CancellationTokenSource();
+        _cts = cts;
+        _acceptTask = Task.Run(() => AcceptLoopAsync(cts.Token), cts.Token);
+        _broadcastTask = Task.Run(() => BroadcastLoopAsync(cts.Token), cts.Token);
     }
 
     public void Stop()
     {
-        try { _cts?.Cancel(); } catch { }
+        _cts?.Cancel();
         var listener = _listener;
         _listener = null;
-        try { listener?.Stop(); } catch { }
-        try { listener?.Close(); } catch { }
+        listener?.Close();
 
         foreach (var client in _clients.Values)
             client.CloseAsync("server stopping").GetAwaiter().GetResult();
@@ -176,15 +176,21 @@ public sealed class WebSocketApiServer
                 }
 
                 Plugin.Logger.Msg($"[WebSocket] open client={client.Id}");
-                _ = Task.Run(() => ReceiveLoopAsync(client, token));
+                _ = Task.Run(() => ReceiveLoopAsync(client, token), token);
                 await SendAsync(client, new { type = "hello", clientId = client.Id, url = Url }).ConfigureAwait(false);
             }
-            catch (HttpListenerException) when (token.IsCancellationRequested) { }
-            catch (ObjectDisposedException) { }
+            catch (HttpListenerException) when (token.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (ObjectDisposedException) when (token.IsCancellationRequested || !listener.IsListening)
+            {
+                break;
+            }
             catch (Exception ex)
             {
                 Plugin.Logger.Warning($"[WebSocket] accept failure: {ex.Message}");
-                try { ctx?.Response.Close(); } catch { }
+                CloseResponse(ctx?.Response);
             }
         }
     }
@@ -214,7 +220,10 @@ public sealed class WebSocketApiServer
         {
             Plugin.Logger.Warning($"[WebSocket] receive failure client={client.Id}: {ex.Message}");
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // Normal server shutdown; the finally block removes the client.
+        }
         catch (Exception ex)
         {
             Plugin.Logger.Warning($"[WebSocket] client loop failure client={client.Id}: {ex.Message}");
@@ -399,7 +408,7 @@ public sealed class WebSocketApiServer
         out TelemetryCommand command,
         out string error)
     {
-        command = null!;
+        command = new TelemetryCommand();
         error = "";
 
         var commandName = NormalizeDriverCommand(TryGetString(root, "command") ?? TryGetString(root, "action"));
@@ -416,7 +425,7 @@ public sealed class WebSocketApiServer
         out TelemetryCommand command,
         out string error)
     {
-        command = null!;
+        command = new TelemetryCommand();
         error = "";
 
         var value = 0.0;
@@ -473,7 +482,7 @@ public sealed class WebSocketApiServer
         out TelemetryCommand command,
         out string error)
     {
-        command = null!;
+        command = new TelemetryCommand();
         error = "";
 
         var target = NormalizeCommandTarget(TryGetString(root, "target") ?? TryGetString(root, "group"));
@@ -581,7 +590,10 @@ public sealed class WebSocketApiServer
             }
 
             try { await Task.Delay(25, token).ConfigureAwait(false); }
-            catch (OperationCanceledException) { }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                break;
+            }
         }
     }
 
@@ -622,7 +634,8 @@ public sealed class WebSocketApiServer
             var json = JsonSerializer.Serialize(payload, payload.GetType(), JsonOptions);
             var bytes = Encoding.UTF8.GetBytes(json);
 
-            await client.SendLock.WaitAsync().ConfigureAwait(false);
+            var token = _cts?.Token ?? CancellationToken.None;
+            await client.SendLock.WaitAsync(token).ConfigureAwait(false);
             try
             {
                 if (client.Socket.State == WebSocketState.Open)
@@ -638,6 +651,10 @@ public sealed class WebSocketApiServer
             {
                 client.SendLock.Release();
             }
+        }
+        catch (OperationCanceledException) when (_cts?.IsCancellationRequested == true)
+        {
+            _clients.TryRemove(client.Id, out _);
         }
         catch (Exception ex)
         {
@@ -786,6 +803,21 @@ public sealed class WebSocketApiServer
 
     private static long UnixNow() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
+    private static void CloseResponse(HttpListenerResponse? response)
+    {
+        if (response == null)
+            return;
+
+        try
+        {
+            response.Close();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Another shutdown path already closed the response.
+        }
+    }
+
     private sealed class ClientConnection
     {
         private readonly object _gate = new();
@@ -844,8 +876,14 @@ public sealed class WebSocketApiServer
                         CancellationToken.None).ConfigureAwait(false);
                 }
             }
-            catch { }
-            try { Socket.Dispose(); } catch { }
+            catch (WebSocketException)
+            {
+                // The peer may disappear before the close handshake completes.
+            }
+            finally
+            {
+                Socket.Dispose();
+            }
         }
     }
 }
