@@ -4,7 +4,7 @@
 
 Preferred URL: `ws://localhost:5556/ws`
 
-If the configured port is occupied, SimRailConnect tries the next nine ports. Use the final URL printed in the MelonLoader log.
+If the configured port is unavailable, SimRailConnect tries the next nine ports. Use the final URL printed in the MelonLoader log.
 
 The server publishes read-only telemetry snapshots collected from SimRail Pyscreen data on the Unity main thread. WebSocket handlers run on background threads and only read the latest snapshot.
 

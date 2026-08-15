@@ -14,7 +14,7 @@ This project is for interoperability, simulation research, safety-system fidelit
 
 - Loads as a `MelonMod` from `<SimRail>\Mods\SimRailConnect.dll`
 - Starts the WebSocket API on localhost
-- Falls back to one of the next nine ports when the configured port is already occupied
+- Falls back to one of the next nine ports when the configured port is unavailable
 - Publishes read-only train telemetry from `VehiclePyscreenDataSource`
 - Publishes best-effort non-ETCS next-signal metadata from the current track scan, including distance, speed metadata, and inferred color when available
 - Queues limited Pyscreen command writes from WebSocket clients
@@ -34,7 +34,7 @@ Prerequisites:
 
 Installation:
 
-Download SimRailConnect.dll from [Releases](releases).
+Download SimRailConnect.dll from [Releases](https://github.com/rinnyanneko/SimRailConnect/releases).
 
 Copy `SimRailConnect.dll` into the game's Mods folder:
 
@@ -80,7 +80,7 @@ Edit `<SimRail>\UserData\MelonPreferences.cfg` under `[SimRailConnect]`.
 | Key | Default | Description |
 | :--- | :--- | :--- |
 | `UpdateIntervalMs` | `100` | Main-thread telemetry polling interval |
-| `WebSocketPort` | `5556` | Preferred WebSocket API server port; the next nine ports are tried if occupied |
+| `WebSocketPort` | `5556` | Preferred WebSocket API server port; the next nine ports are tried if unavailable |
 | `WebSocketMaxClients` | `3` | Maximum concurrent WebSocket clients |
 | `WebSocketDefaultRateHz` | `10` | Default push rate |
 | `WebSocketMaxRateHz` | `20` | Maximum per-client push rate |
@@ -98,7 +98,7 @@ MelonLoader writes logs to:
 
 Useful SimRailConnect log lines include the detected game path, detected `Il2CppAssemblies` path, WebSocket URL, scene load/unload, telemetry cache invalidation, and Pyscreen source discovery.
 
-Always use the WebSocket URL printed at startup. If the configured port is occupied, SimRailConnect logs a warning and prints the fallback URL it selected.
+Always use the WebSocket URL printed at startup. If the configured port is unavailable, SimRailConnect logs a warning and prints the fallback URL it selected.
 
 If the log shows `Melon Assembly loaded: '.\Mods\SimRailConnect.dll'` followed by `0 Mods loaded`, the DLL was not built against the real net6 MelonLoader assemblies. Rebuild with `GameDir` pointing at the SimRail install so the output inherits from `MelonLoader.MelonMod` in `<SimRail>\MelonLoader\net6\MelonLoader.dll`.
 

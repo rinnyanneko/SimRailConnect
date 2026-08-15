@@ -39,7 +39,7 @@
     <MelonLoaderPath Condition="'$(MelonLoaderPath)' == ''">$(GameDir)\MelonLoader\net6\MelonLoader.dll</MelonLoaderPath>
     <Il2CppAssembliesPath Condition="'$(Il2CppAssembliesPath)' == ''">$(GameDir)\MelonLoader\Il2CppAssemblies</Il2CppAssembliesPath>
     <UseRealSimRailRefs>false</UseRealSimRailRefs>
-    <UseRealSimRailRefs Condition="Exists('$(MelonLoaderPath)') and Exists('$(Il2CppAssembliesPath)\Assembly-CSharp.dll')">true</UseRealSimRailRefs>
+    <UseRealSimRailRefs Condition="Exists('$(MelonLoaderPath)') and Exists('$(GameDir)\MelonLoader\net6\Il2CppInterop.Runtime.dll') and Exists('$(Il2CppAssembliesPath)\Assembly-CSharp.dll') and Exists('$(Il2CppAssembliesPath)\Il2Cppmscorlib.dll') and Exists('$(Il2CppAssembliesPath)\UnityEngine.CoreModule.dll') and Exists('$(Il2CppAssembliesPath)\UnityEngine.PhysicsModule.dll')">true</UseRealSimRailRefs>
 
     <!-- Don't copy reference assemblies to output -->
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
@@ -96,7 +96,7 @@
   </Target>
 
   <Target Name="CopyReleaseToDist" AfterTargets="Build"
-          Condition="'$(Configuration)' == 'Release' and Exists('$(MSBuildProjectDirectory)\..\..\dist')">
+          Condition="'$(Configuration)' == 'Release'">
     <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll"
           DestinationFolder="$(MSBuildProjectDirectory)\..\..\dist\"
           SkipUnchangedFiles="true" />

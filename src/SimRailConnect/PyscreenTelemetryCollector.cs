@@ -117,11 +117,7 @@ internal sealed class PyscreenTelemetryCollector
                 // Drain invalidate commands so clients can still force a cache reset
                 // when no source has been found yet; discard other commands.
                 DrainWithoutSource();
-                if (!_waitingSnapshotPublished)
-                {
-                    TelemetryState.PublishSnapshot(TelemetrySnapshot.CreateInactive("Waiting for VehiclePyscreenDataSource."));
-                    _waitingSnapshotPublished = true;
-                }
+                PublishWaitingSnapshot();
                 return;
             }
 
@@ -501,6 +497,15 @@ internal sealed class PyscreenTelemetryCollector
         }
     }
 
+    private void PublishWaitingSnapshot()
+    {
+        if (_waitingSnapshotPublished)
+            return;
+
+        TelemetryState.PublishSnapshot(TelemetrySnapshot.CreateInactive("Waiting for VehiclePyscreenDataSource."));
+        _waitingSnapshotPublished = true;
+    }
+
     private bool DrainCommands(VehiclePyscreenDataSource source)
     {
         var processed = 0;
@@ -515,7 +520,7 @@ internal sealed class PyscreenTelemetryCollector
                 if (command.Kind == TelemetryCommandKind.InvalidateTelemetry)
                 {
                     Invalidate(command.Reason);
-                    TelemetryState.PublishSnapshot(TelemetrySnapshot.CreateInactive("Telemetry cache invalidated; waiting for new VehiclePyscreenDataSource."));
+                    PublishWaitingSnapshot();
                     return true;
                 }
 

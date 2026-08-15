@@ -98,6 +98,7 @@ public sealed class WebSocketApiServer
             try
             {
                 candidate.Start();
+                // Publish only a bound listener; the accept loop captures it and Stop detaches it before disposal.
                 _listener = candidate;
                 _activePort = candidatePort;
                 break;

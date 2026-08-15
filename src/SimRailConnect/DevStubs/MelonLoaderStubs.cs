@@ -45,6 +45,7 @@ public sealed class MelonInfoAttribute : Attribute
 [AttributeUsage(AttributeTargets.Assembly)]
 public sealed class MelonGameAttribute : Attribute
 {
+    // Keep this metadata contract aligned with MelonLoader's runtime attribute.
     public MelonGameAttribute(string developer, string name)
     {
         Developer = developer;

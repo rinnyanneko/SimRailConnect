@@ -121,7 +121,7 @@ public class Plugin : MelonMod
             {
                 WebSocketServer?.Stop();
                 WebSocketServer = null;
-                Logger.Error($"WebSocket API server is unavailable, but telemetry collection will continue: {ex.Message}");
+                Logger.Error($"WebSocket API server is unavailable, but telemetry collection will continue: {ex}");
             }
 
             Logger.Msg($"Loaded assembly path: {assemblyPath}");
