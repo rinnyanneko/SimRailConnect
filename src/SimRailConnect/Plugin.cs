@@ -30,7 +30,7 @@ namespace SimRailConnect;
 public class Plugin : MelonMod
 {
     public const string PluginName = "SimRailConnect";
-    public const string PluginVersion = "0.0.1";
+    public const string PluginVersion = "0.0.2";
 
     /// <summary>
     /// Per-plugin logger instance.  Assigned once in <see cref="OnInitializeMelon"/>
@@ -102,16 +102,25 @@ public class Plugin : MelonMod
             _telemetryCollector.IsEnabled = enablePyscreenTelemetry.Value;
 #endif
 
-            WebSocketServer = new WebSocketApiServer(
-                webSocketPort.Value,
-                webSocketMaxClients.Value,
-                webSocketDefaultRateHz.Value,
-                webSocketMaxRateHz.Value,
-                webSocketPayloadLimitBytes.Value,
-                apiToken.Value);
-            WebSocketServer.Start();
+            try
+            {
+                WebSocketServer = new WebSocketApiServer(
+                    webSocketPort.Value,
+                    webSocketMaxClients.Value,
+                    webSocketDefaultRateHz.Value,
+                    webSocketMaxRateHz.Value,
+                    webSocketPayloadLimitBytes.Value,
+                    apiToken.Value);
+                WebSocketServer.Start();
+                Logger.Msg($"WebSocket API server started on {WebSocketServer.Url}");
+            }
+            catch (Exception ex)
+            {
+                WebSocketServer?.Stop();
+                WebSocketServer = null;
+                Logger.Error($"WebSocket API server is unavailable, but telemetry collection will continue: {ex.Message}");
+            }
 
-            Logger.Msg($"WebSocket API server started on {WebSocketServer.Url}");
             Logger.Msg($"Loaded assembly path: {assemblyPath}");
             Logger.Msg($"Detected game path: {gameBasePath}");
             Logger.Msg($"Detected Il2CppAssemblies path: {il2CppAssembliesPath} (exists={Directory.Exists(il2CppAssembliesPath)})");

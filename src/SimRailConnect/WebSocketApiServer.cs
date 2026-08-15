@@ -39,20 +39,23 @@ namespace SimRailConnect;
 /// </summary>
 public sealed class WebSocketApiServer
 {
-    private readonly int _port;
+    private const int PortFallbackAttempts = 10;
+
+    private readonly int _requestedPort;
     private readonly int _maxClients;
     private readonly int _defaultRateHz;
     private readonly int _maxRateHz;
     private readonly int _payloadLimitBytes;
     private readonly string _token;
-    private readonly HttpListener _listener = new();
     private readonly ConcurrentDictionary<string, ClientConnection> _clients = new();
+    private HttpListener? _listener;
     private CancellationTokenSource? _cts;
     private Task? _acceptTask;
     private Task? _broadcastTask;
     private long _sequence;
+    private int _activePort;
 
-    public string Url => $"ws://localhost:{_port}/ws";
+    public string Url => $"ws://localhost:{_activePort}/ws";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -69,19 +72,50 @@ public sealed class WebSocketApiServer
         int payloadLimitBytes,
         string token)
     {
-        _port = port;
+        _requestedPort = Clamp(port, 1, 65535);
+        _activePort = _requestedPort;
         _maxClients = Math.Max(1, maxClients);
-        _defaultRateHz = Clamp(defaultRateHz, 1, 60);
         _maxRateHz = Clamp(maxRateHz, 1, 60);
+        _defaultRateHz = Clamp(defaultRateHz, 1, _maxRateHz);
         _payloadLimitBytes = Math.Max(1024, payloadLimitBytes);
         _token = token ?? "";
     }
 
     public void Start()
     {
+        if (_listener?.IsListening == true)
+            return;
+
+        HttpListenerException? lastError = null;
+        for (var attempt = 0; attempt < PortFallbackAttempts; attempt++)
+        {
+            var candidatePort = _requestedPort + attempt;
+            if (candidatePort > 65535)
+                break;
+
+            var candidate = new HttpListener();
+            candidate.Prefixes.Add($"http://localhost:{candidatePort}/");
+            try
+            {
+                candidate.Start();
+                _listener = candidate;
+                _activePort = candidatePort;
+                break;
+            }
+            catch (HttpListenerException ex)
+            {
+                lastError = ex;
+                try { candidate.Close(); } catch { }
+            }
+        }
+
+        if (_listener?.IsListening != true)
+            throw new HttpListenerException(lastError?.ErrorCode ?? 32, $"No available WebSocket port in range {_requestedPort}-{Math.Min(65535, _requestedPort + PortFallbackAttempts - 1)}");
+
+        if (_activePort != _requestedPort)
+            Plugin.Logger.Warning($"WebSocket port {_requestedPort} is unavailable; using {_activePort} instead.");
+
         _cts = new CancellationTokenSource();
-        _listener.Prefixes.Add($"http://localhost:{_port}/");
-        _listener.Start();
         _acceptTask = Task.Run(() => AcceptLoopAsync(_cts.Token));
         _broadcastTask = Task.Run(() => BroadcastLoopAsync(_cts.Token));
     }
@@ -89,8 +123,10 @@ public sealed class WebSocketApiServer
     public void Stop()
     {
         try { _cts?.Cancel(); } catch { }
-        try { _listener.Stop(); } catch { }
-        try { _listener.Close(); } catch { }
+        var listener = _listener;
+        _listener = null;
+        try { listener?.Stop(); } catch { }
+        try { listener?.Close(); } catch { }
 
         foreach (var client in _clients.Values)
             client.CloseAsync("server stopping").GetAwaiter().GetResult();
@@ -100,12 +136,16 @@ public sealed class WebSocketApiServer
 
     private async Task AcceptLoopAsync(CancellationToken token)
     {
-        while (!token.IsCancellationRequested && _listener.IsListening)
+        var listener = _listener;
+        if (listener == null)
+            return;
+
+        while (!token.IsCancellationRequested && listener.IsListening)
         {
             HttpListenerContext? ctx = null;
             try
             {
-                ctx = await _listener.GetContextAsync().ConfigureAwait(false);
+                ctx = await listener.GetContextAsync().ConfigureAwait(false);
                 if (!ctx.Request.IsWebSocketRequest || ctx.Request.Url?.AbsolutePath != "/ws")
                 {
                     ctx.Response.StatusCode = 404;
@@ -515,7 +555,7 @@ public sealed class WebSocketApiServer
                 var snapshot = TelemetryState.CurrentSnapshot;
                 if (snapshot != null)
                 {
-                    foreach (var client in _clients.Values.ToArray())
+                    foreach (var client in _clients.Values)
                     {
                         if (!client.ShouldSend()) continue;
 

@@ -27,7 +27,7 @@
 
     <AssemblyName>SimRailConnect</AssemblyName>
     <RootNamespace>SimRailConnect</RootNamespace>
-    <Version>0.0.1</Version>
+    <Version>0.0.2</Version>
     <Description>SimRail MelonLoader mod that exposes local WebSocket telemetry</Description>
 
     <!--
@@ -93,5 +93,13 @@
           DestinationFolder="$(GameDir)\Mods\"
           SkipUnchangedFiles="true" />
     <Message Text="Copied $(AssemblyName).dll → $(GameDir)\Mods\" Importance="high" />
+  </Target>
+
+  <Target Name="CopyReleaseToDist" AfterTargets="Build"
+          Condition="'$(Configuration)' == 'Release' and Exists('$(MSBuildProjectDirectory)\..\..\dist')">
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll"
+          DestinationFolder="$(MSBuildProjectDirectory)\..\..\dist\"
+          SkipUnchangedFiles="true" />
+    <Message Text="Copied $(AssemblyName).dll → dist\" Importance="high" />
   </Target>
 </Project>

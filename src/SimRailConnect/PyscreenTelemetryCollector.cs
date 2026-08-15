@@ -19,9 +19,10 @@
 #if SIMRAIL_IL2CPP
 using System;
 using System.Collections.Generic;
-using Assets.Scripts.Signs;
 using Il2CppInterop.Runtime.InteropTypes;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
+using Il2Cpp;
+using Il2CppAssets.Scripts.Signs;
 using UnityEngine;
 using UnityObject = UnityEngine.Object;
 
@@ -92,6 +93,8 @@ internal sealed class PyscreenTelemetryCollector
     private IntPtr _lastSignalScanTrackPointer;
     private float _lastSignalScanPosition;
     private float _lastSignalScanDirection;
+    private bool _discoveryMissLogged;
+    private bool _waitingSnapshotPublished;
 
     public bool IsEnabled { get; set; }
 
@@ -114,7 +117,11 @@ internal sealed class PyscreenTelemetryCollector
                 // Drain invalidate commands so clients can still force a cache reset
                 // when no source has been found yet; discard other commands.
                 DrainWithoutSource();
-                TelemetryState.PublishSnapshot(TelemetrySnapshot.CreateInactive("Waiting for VehiclePyscreenDataSource."));
+                if (!_waitingSnapshotPublished)
+                {
+                    TelemetryState.PublishSnapshot(TelemetrySnapshot.CreateInactive("Waiting for VehiclePyscreenDataSource."));
+                    _waitingSnapshotPublished = true;
+                }
                 return;
             }
 
@@ -122,6 +129,7 @@ internal sealed class PyscreenTelemetryCollector
                 return;
 
             TelemetryState.PublishSnapshot(CreateSnapshot(source, now));
+            _waitingSnapshotPublished = false;
             _consecutiveFailures = 0;
         }
         catch (Exception ex)
@@ -148,6 +156,8 @@ internal sealed class PyscreenTelemetryCollector
         _cachedSignalAhead = SignalUnavailable("signal cache invalidated");
         _lastSignalScanTime = 0;
         _lastSignalScanTrackPointer = IntPtr.Zero;
+        _discoveryMissLogged = false;
+        _waitingSnapshotPublished = false;
         Plugin.Logger.Msg($"Telemetry cache invalidated: {reason}");
     }
 
@@ -161,7 +171,6 @@ internal sealed class PyscreenTelemetryCollector
             return null;
 
         _nextDiscoveryAt = now + DiscoveryRetryMs;
-        Plugin.Logger.Msg("Telemetry discovery started: scanning Pyscreen sources.");
 
         var screens = UnityObject.FindObjectsOfType<Pyscreen>();
         for (var i = 0; i < screens.Length; i++)
@@ -177,11 +186,16 @@ internal sealed class PyscreenTelemetryCollector
             _source = candidate;
             _controller = ResolveController(candidate!);
             _trainset = ResolveTrainset(candidate!, _controller);
+            _discoveryMissLogged = false;
             Plugin.Logger.Msg("Telemetry discovery completed: VehiclePyscreenDataSource found.");
             return _source;
         }
 
-        Plugin.Logger.Msg("Telemetry discovery completed: no VehiclePyscreenDataSource found.");
+        if (!_discoveryMissLogged)
+        {
+            _discoveryMissLogged = true;
+            Plugin.Logger.Msg("No VehiclePyscreenDataSource is active; discovery will continue in the background.");
+        }
         return null;
     }
 
