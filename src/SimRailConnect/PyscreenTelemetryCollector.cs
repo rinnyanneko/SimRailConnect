@@ -19,10 +19,11 @@
 #if SIMRAIL_IL2CPP
 using System;
 using System.Collections.Generic;
-using Il2Cpp;
-using Il2CppAssets.Scripts.Signs;
+using Il2CppInterop.Runtime;
 using Il2CppInterop.Runtime.InteropTypes;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
+using Il2Cpp;
+using Il2CppAssets.Scripts.Signs;
 using UnityEngine;
 using UnityObject = UnityEngine.Object;
 
@@ -93,6 +94,8 @@ internal sealed class PyscreenTelemetryCollector
     private IntPtr _lastSignalScanTrackPointer;
     private float _lastSignalScanPosition;
     private float _lastSignalScanDirection;
+    private bool _discoveryMissLogged;
+    private bool _waitingSnapshotPublished;
 
     public bool IsEnabled { get; set; }
 
@@ -115,7 +118,7 @@ internal sealed class PyscreenTelemetryCollector
                 // Drain invalidate commands so clients can still force a cache reset
                 // when no source has been found yet; discard other commands.
                 DrainWithoutSource();
-                TelemetryState.PublishSnapshot(TelemetrySnapshot.CreateInactive("Waiting for VehiclePyscreenDataSource."));
+                PublishWaitingSnapshot();
                 return;
             }
 
@@ -123,6 +126,7 @@ internal sealed class PyscreenTelemetryCollector
                 return;
 
             TelemetryState.PublishSnapshot(CreateSnapshot(source, now));
+            _waitingSnapshotPublished = false;
             _consecutiveFailures = 0;
         }
         catch (Exception ex)
@@ -149,6 +153,8 @@ internal sealed class PyscreenTelemetryCollector
         _cachedSignalAhead = SignalUnavailable("signal cache invalidated");
         _lastSignalScanTime = 0;
         _lastSignalScanTrackPointer = IntPtr.Zero;
+        _discoveryMissLogged = false;
+        _waitingSnapshotPublished = false;
         Plugin.Logger.Msg($"Telemetry cache invalidated: {reason}");
     }
 
@@ -162,7 +168,6 @@ internal sealed class PyscreenTelemetryCollector
             return null;
 
         _nextDiscoveryAt = now + DiscoveryRetryMs;
-        Plugin.Logger.Msg("Telemetry discovery started: scanning Pyscreen sources.");
 
         var screens = UnityObject.FindObjectsOfType<Pyscreen>();
         for (var i = 0; i < screens.Length; i++)
@@ -178,22 +183,27 @@ internal sealed class PyscreenTelemetryCollector
             _source = candidate;
             _controller = ResolveController(candidate!);
             _trainset = ResolveTrainset(candidate!, _controller);
+            _discoveryMissLogged = false;
             Plugin.Logger.Msg("Telemetry discovery completed: VehiclePyscreenDataSource found.");
             return _source;
         }
 
-        Plugin.Logger.Msg("Telemetry discovery completed: no VehiclePyscreenDataSource found.");
+        if (!_discoveryMissLogged)
+        {
+            _discoveryMissLogged = true;
+            Plugin.Logger.Msg("No VehiclePyscreenDataSource is active; discovery will continue in the background.");
+        }
         return null;
     }
 
     private TelemetrySnapshot CreateSnapshot(VehiclePyscreenDataSource source, long now)
     {
-        var generalFloat = GetArray<double>(source.generalFloat?.data);
-        var pressureFloat = GetArray<double>(source.eimppn?.data);
-        var generalInt = GetArray<int>(source.generalInt?.data);
-        var generalBool = GetArray<bool>(source.generalBool?.data);
-        var brakeBool = GetArray<bool>(source.brakes?.data);
-        var emuBool = GetArray<bool>(source.emu?.data);
+        var generalFloat = GetDataArray(source.generalFloat);
+        var pressureFloat = GetDataArray(source.eimppn);
+        var generalInt = GetDataArray(source.generalInt);
+        var generalBool = GetDataArray(source.generalBool);
+        var brakeBool = GetDataArray(source.brakes);
+        var emuBool = GetDataArray(source.emu);
 
         var velocity = Read(generalFloat, FloatIndex.Velocity);
         var acceleration = CalculateAcceleration(velocity, now);
@@ -488,6 +498,15 @@ internal sealed class PyscreenTelemetryCollector
         }
     }
 
+    private void PublishWaitingSnapshot()
+    {
+        if (_waitingSnapshotPublished)
+            return;
+
+        TelemetryState.PublishSnapshot(TelemetrySnapshot.CreateInactive("Waiting for VehiclePyscreenDataSource."));
+        _waitingSnapshotPublished = true;
+    }
+
     private bool DrainCommands(VehiclePyscreenDataSource source)
     {
         var processed = 0;
@@ -502,7 +521,7 @@ internal sealed class PyscreenTelemetryCollector
                 if (command.Kind == TelemetryCommandKind.InvalidateTelemetry)
                 {
                     Invalidate(command.Reason);
-                    TelemetryState.PublishSnapshot(TelemetrySnapshot.CreateInactive("Telemetry cache invalidated; waiting for new VehiclePyscreenDataSource."));
+                    PublishWaitingSnapshot();
                     return true;
                 }
 
@@ -526,7 +545,7 @@ internal sealed class PyscreenTelemetryCollector
         {
             case "eimpcBool":
                 Write(
-                    GetArray<bool>(source.eimpcBool?.data),
+                    GetDataArray(source.eimpcBool),
                     ResolveIndex(command, EimpcBoolFields),
                     6,
                     command.Instance,
@@ -535,7 +554,7 @@ internal sealed class PyscreenTelemetryCollector
 
             case "eimpcInt":
                 Write(
-                    GetArray<int>(source.eimpcInt?.data),
+                    GetDataArray(source.eimpcInt),
                     ResolveIndex(command, EimpcIntFields),
                     1,
                     command.Instance,
@@ -544,7 +563,7 @@ internal sealed class PyscreenTelemetryCollector
 
             case "eimpcFloat":
                 Write(
-                    GetArray<double>(source.eimpcFloat?.data),
+                    GetDataArray(source.eimpcFloat),
                     ResolveIndex(command, EimpcFloatFields),
                     12,
                     command.Instance,
@@ -842,13 +861,22 @@ internal sealed class PyscreenTelemetryCollector
         throw new InvalidOperationException($"Unknown field '{command.Field}' for {command.Target}");
     }
 
-    private static Il2CppStructArray<T>? GetArray<T>(Il2CppObjectBase? data)
+    private static Il2CppStructArray<T>? GetDataArray<T>(PyscreenIOClassBase<T>? source)
         where T : unmanaged
     {
-        if (!IsUsable(data))
+        if (!IsUsable(source))
             return null;
 
-        return new Il2CppStructArray<T>(data!.Pointer);
+        var pointer = IL2CPP.il2cpp_field_get_value_object(DataField<T>.Pointer, source!.Pointer);
+        return pointer == IntPtr.Zero ? null : new Il2CppStructArray<T>(pointer);
+    }
+
+    private static class DataField<T>
+        where T : unmanaged
+    {
+        internal static readonly IntPtr Pointer = IL2CPP.GetIl2CppField(
+            Il2CppClassPointerStore<PyscreenIOClassBase<T>>.NativeClassPtr,
+            "data");
     }
 
     private static float Clamp01(double value) =>

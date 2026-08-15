@@ -33,12 +33,7 @@ public static class TelemetryState
     /// Written once by <see cref="Plugin"/> at startup and consumed by the
     /// Unity-main-thread Pyscreen collector.
     /// </summary>
-    public static int UpdateIntervalMs = 100;
-
-    /// <summary>
-    /// Reserved for telemetry providers that want to coordinate their next tick.
-    /// </summary>
-    public static float NextUpdate = 0f;
+    public static int UpdateIntervalMs { get; set; } = 100;
 
     /// <summary>
     /// Latest telemetry snapshot.

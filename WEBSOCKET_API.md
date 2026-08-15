@@ -2,7 +2,9 @@
 
 # SimRailConnect WebSocket API
 
-Default URL: `ws://localhost:5556/ws`
+Preferred URL: `ws://localhost:5556/ws`
+
+If the configured port is unavailable, SimRailConnect tries the next nine ports. Use the final URL printed in the MelonLoader log.
 
 The server publishes read-only telemetry snapshots collected from SimRail Pyscreen data on the Unity main thread. WebSocket handlers run on background threads and only read the latest snapshot.
 
@@ -381,7 +383,7 @@ If `ApiToken` is configured, clients must provide either:
 
 | Setting | Default |
 |---|---|
-| `WebSocketPort` | `5556` |
+| `WebSocketPort` | `5556` (preferred; next nine ports are fallback candidates) |
 | `WebSocketMaxClients` | `3` |
 | `WebSocketDefaultRateHz` | `10` |
 | `WebSocketMaxRateHz` | `20` |

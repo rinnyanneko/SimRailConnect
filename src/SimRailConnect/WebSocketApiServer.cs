@@ -39,20 +39,23 @@ namespace SimRailConnect;
 /// </summary>
 public sealed class WebSocketApiServer
 {
-    private readonly int _port;
+    private const int PortFallbackAttempts = 10;
+
+    private readonly int _requestedPort;
     private readonly int _maxClients;
     private readonly int _defaultRateHz;
     private readonly int _maxRateHz;
     private readonly int _payloadLimitBytes;
     private readonly string _token;
-    private readonly HttpListener _listener = new();
     private readonly ConcurrentDictionary<string, ClientConnection> _clients = new();
+    private HttpListener? _listener;
     private CancellationTokenSource? _cts;
     private Task? _acceptTask;
     private Task? _broadcastTask;
     private long _sequence;
+    private int _activePort;
 
-    public string Url => $"ws://localhost:{_port}/ws";
+    public string Url => $"ws://localhost:{_activePort}/ws";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -69,28 +72,62 @@ public sealed class WebSocketApiServer
         int payloadLimitBytes,
         string token)
     {
-        _port = port;
+        _requestedPort = Clamp(port, 1, 65535);
+        _activePort = _requestedPort;
         _maxClients = Math.Max(1, maxClients);
-        _defaultRateHz = Clamp(defaultRateHz, 1, 60);
         _maxRateHz = Clamp(maxRateHz, 1, 60);
+        _defaultRateHz = Clamp(defaultRateHz, 1, _maxRateHz);
         _payloadLimitBytes = Math.Max(1024, payloadLimitBytes);
         _token = token ?? "";
     }
 
     public void Start()
     {
-        _cts = new CancellationTokenSource();
-        _listener.Prefixes.Add($"http://localhost:{_port}/");
-        _listener.Start();
-        _acceptTask = Task.Run(() => AcceptLoopAsync(_cts.Token));
-        _broadcastTask = Task.Run(() => BroadcastLoopAsync(_cts.Token));
+        if (_listener?.IsListening == true)
+            return;
+
+        HttpListenerException? lastError = null;
+        for (var attempt = 0; attempt < PortFallbackAttempts; attempt++)
+        {
+            var candidatePort = _requestedPort + attempt;
+            if (candidatePort > 65535)
+                break;
+
+            var candidate = new HttpListener();
+            candidate.Prefixes.Add($"http://localhost:{candidatePort}/");
+            try
+            {
+                candidate.Start();
+                // Publish only a bound listener; the accept loop captures it and Stop detaches it before disposal.
+                _listener = candidate;
+                _activePort = candidatePort;
+                break;
+            }
+            catch (HttpListenerException ex)
+            {
+                lastError = ex;
+                candidate.Close();
+            }
+        }
+
+        if (_listener?.IsListening != true)
+            throw new HttpListenerException(lastError?.ErrorCode ?? 32, $"No available WebSocket port in range {_requestedPort}-{Math.Min(65535, _requestedPort + PortFallbackAttempts - 1)}");
+
+        if (_activePort != _requestedPort)
+            Plugin.Logger.Warning($"WebSocket port {_requestedPort} is unavailable; using {_activePort} instead.");
+
+        var cts = new CancellationTokenSource();
+        _cts = cts;
+        _acceptTask = Task.Run(() => AcceptLoopAsync(cts.Token), cts.Token);
+        _broadcastTask = Task.Run(() => BroadcastLoopAsync(cts.Token), cts.Token);
     }
 
     public void Stop()
     {
-        try { _cts?.Cancel(); } catch { }
-        try { _listener.Stop(); } catch { }
-        try { _listener.Close(); } catch { }
+        _cts?.Cancel();
+        var listener = _listener;
+        _listener = null;
+        listener?.Close();
 
         foreach (var client in _clients.Values)
             client.CloseAsync("server stopping").GetAwaiter().GetResult();
@@ -100,12 +137,16 @@ public sealed class WebSocketApiServer
 
     private async Task AcceptLoopAsync(CancellationToken token)
     {
-        while (!token.IsCancellationRequested && _listener.IsListening)
+        var listener = _listener;
+        if (listener == null)
+            return;
+
+        while (!token.IsCancellationRequested && listener.IsListening)
         {
             HttpListenerContext? ctx = null;
             try
             {
-                ctx = await _listener.GetContextAsync().ConfigureAwait(false);
+                ctx = await listener.GetContextAsync().ConfigureAwait(false);
                 if (!ctx.Request.IsWebSocketRequest || ctx.Request.Url?.AbsolutePath != "/ws")
                 {
                     ctx.Response.StatusCode = 404;
@@ -136,15 +177,21 @@ public sealed class WebSocketApiServer
                 }
 
                 Plugin.Logger.Msg($"[WebSocket] open client={client.Id}");
-                _ = Task.Run(() => ReceiveLoopAsync(client, token));
+                _ = Task.Run(() => ReceiveLoopAsync(client, token), token);
                 await SendAsync(client, new { type = "hello", clientId = client.Id, url = Url }).ConfigureAwait(false);
             }
-            catch (HttpListenerException) when (token.IsCancellationRequested) { }
-            catch (ObjectDisposedException) { }
+            catch (HttpListenerException) when (token.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (ObjectDisposedException) when (token.IsCancellationRequested || !listener.IsListening)
+            {
+                break;
+            }
             catch (Exception ex)
             {
                 Plugin.Logger.Warning($"[WebSocket] accept failure: {ex.Message}");
-                try { ctx?.Response.Close(); } catch { }
+                CloseResponse(ctx?.Response);
             }
         }
     }
@@ -174,7 +221,10 @@ public sealed class WebSocketApiServer
         {
             Plugin.Logger.Warning($"[WebSocket] receive failure client={client.Id}: {ex.Message}");
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // Normal server shutdown; the finally block removes the client.
+        }
         catch (Exception ex)
         {
             Plugin.Logger.Warning($"[WebSocket] client loop failure client={client.Id}: {ex.Message}");
@@ -359,7 +409,7 @@ public sealed class WebSocketApiServer
         out TelemetryCommand command,
         out string error)
     {
-        command = null!;
+        command = new TelemetryCommand();
         error = "";
 
         var commandName = NormalizeDriverCommand(TryGetString(root, "command") ?? TryGetString(root, "action"));
@@ -376,7 +426,7 @@ public sealed class WebSocketApiServer
         out TelemetryCommand command,
         out string error)
     {
-        command = null!;
+        command = new TelemetryCommand();
         error = "";
 
         var value = 0.0;
@@ -433,7 +483,7 @@ public sealed class WebSocketApiServer
         out TelemetryCommand command,
         out string error)
     {
-        command = null!;
+        command = new TelemetryCommand();
         error = "";
 
         var target = NormalizeCommandTarget(TryGetString(root, "target") ?? TryGetString(root, "group"));
@@ -515,7 +565,7 @@ public sealed class WebSocketApiServer
                 var snapshot = TelemetryState.CurrentSnapshot;
                 if (snapshot != null)
                 {
-                    foreach (var client in _clients.Values.ToArray())
+                    foreach (var client in _clients.Values)
                     {
                         if (!client.ShouldSend()) continue;
 
@@ -541,7 +591,10 @@ public sealed class WebSocketApiServer
             }
 
             try { await Task.Delay(25, token).ConfigureAwait(false); }
-            catch (OperationCanceledException) { }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                break;
+            }
         }
     }
 
@@ -582,7 +635,8 @@ public sealed class WebSocketApiServer
             var json = JsonSerializer.Serialize(payload, payload.GetType(), JsonOptions);
             var bytes = Encoding.UTF8.GetBytes(json);
 
-            await client.SendLock.WaitAsync().ConfigureAwait(false);
+            var token = _cts?.Token ?? CancellationToken.None;
+            await client.SendLock.WaitAsync(token).ConfigureAwait(false);
             try
             {
                 if (client.Socket.State == WebSocketState.Open)
@@ -598,6 +652,10 @@ public sealed class WebSocketApiServer
             {
                 client.SendLock.Release();
             }
+        }
+        catch (OperationCanceledException) when (_cts?.IsCancellationRequested == true)
+        {
+            _clients.TryRemove(client.Id, out _);
         }
         catch (Exception ex)
         {
@@ -746,6 +804,21 @@ public sealed class WebSocketApiServer
 
     private static long UnixNow() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
+    private static void CloseResponse(HttpListenerResponse? response)
+    {
+        if (response == null)
+            return;
+
+        try
+        {
+            response.Close();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Another shutdown path already closed the response.
+        }
+    }
+
     private sealed class ClientConnection
     {
         private readonly object _gate = new();
@@ -804,8 +877,14 @@ public sealed class WebSocketApiServer
                         CancellationToken.None).ConfigureAwait(false);
                 }
             }
-            catch { }
-            try { Socket.Dispose(); } catch { }
+            catch (WebSocketException)
+            {
+                // The peer may disappear before the close handshake completes.
+            }
+            finally
+            {
+                Socket.Dispose();
+            }
         }
     }
 }

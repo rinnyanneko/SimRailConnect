@@ -23,21 +23,24 @@ using MelonLoader;
 
 // MelonLoader plugin registration — must be at assembly scope (outside any namespace).
 [assembly: MelonInfo(typeof(SimRailConnect.Plugin), SimRailConnect.Plugin.PluginName, SimRailConnect.Plugin.PluginVersion, "rinnyanneko")]
-[assembly: MelonGame]
+[assembly: MelonGame("SimKol", "SimRail")]
 
 namespace SimRailConnect;
 
 public class Plugin : MelonMod
 {
     public const string PluginName = "SimRailConnect";
-    public const string PluginVersion = "0.0.1";
+    public const string PluginVersion = "0.0.2";
 
     /// <summary>
     /// Per-plugin logger instance.  Assigned once in <see cref="OnInitializeMelon"/>
     /// so that <c>WebSocketApiServer</c> can write structured log entries
     /// without importing MelonLoader directly.
     /// </summary>
-    internal static MelonLogger.Instance Logger = null!;
+    private static MelonLogger.Instance? _logger;
+
+    internal static MelonLogger.Instance Logger =>
+        _logger ?? throw new InvalidOperationException("SimRailConnect logger is not initialized.");
 
     internal static WebSocketApiServer? WebSocketServer { get; private set; }
 #if SIMRAIL_IL2CPP
@@ -46,7 +49,7 @@ public class Plugin : MelonMod
 
     public override void OnInitializeMelon()
     {
-        Logger = base.LoggerInstance;
+        _logger = base.LoggerInstance;
         Logger.Msg($"{PluginName} v{PluginVersion} loading...");
 
         try
@@ -102,16 +105,25 @@ public class Plugin : MelonMod
             _telemetryCollector.IsEnabled = enablePyscreenTelemetry.Value;
 #endif
 
-            WebSocketServer = new WebSocketApiServer(
-                webSocketPort.Value,
-                webSocketMaxClients.Value,
-                webSocketDefaultRateHz.Value,
-                webSocketMaxRateHz.Value,
-                webSocketPayloadLimitBytes.Value,
-                apiToken.Value);
-            WebSocketServer.Start();
+            try
+            {
+                WebSocketServer = new WebSocketApiServer(
+                    webSocketPort.Value,
+                    webSocketMaxClients.Value,
+                    webSocketDefaultRateHz.Value,
+                    webSocketMaxRateHz.Value,
+                    webSocketPayloadLimitBytes.Value,
+                    apiToken.Value);
+                WebSocketServer.Start();
+                Logger.Msg($"WebSocket API server started on {WebSocketServer.Url}");
+            }
+            catch (Exception ex)
+            {
+                WebSocketServer?.Stop();
+                WebSocketServer = null;
+                Logger.Error($"WebSocket API server is unavailable, but telemetry collection will continue: {ex}");
+            }
 
-            Logger.Msg($"WebSocket API server started on {WebSocketServer.Url}");
             Logger.Msg($"Loaded assembly path: {assemblyPath}");
             Logger.Msg($"Detected game path: {gameBasePath}");
             Logger.Msg($"Detected Il2CppAssemblies path: {il2CppAssembliesPath} (exists={Directory.Exists(il2CppAssembliesPath)})");
