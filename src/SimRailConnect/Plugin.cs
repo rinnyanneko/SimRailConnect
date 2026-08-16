@@ -22,7 +22,7 @@ using System.Reflection;
 using MelonLoader;
 
 // MelonLoader plugin registration — must be at assembly scope (outside any namespace).
-[assembly: MelonInfo(typeof(SimRailConnect.Plugin), SimRailConnect.Plugin.PluginName, SimRailConnect.Plugin.PluginVersion, "rinnyanneko")]
+[assembly: MelonInfo(typeof(SimRailConnect.Plugin), SimRailConnect.Plugin.PluginName, SimRailConnect.Plugin.PluginVersion, "mirukuneko")]
 [assembly: MelonGame("SimKol", "SimRail")]
 
 namespace SimRailConnect;
